@@ -7,15 +7,15 @@
 {% endif %}
 <form method="post" action="/register">
   <label>Username<br>
-    <div style="display:flex;align-items:stretch">
+    <div style="display:flex;gap:0;align-items:stretch">
       <input type="text" name="username" id="reg_username" value="{{ username }}" required autocomplete="username"
-             placeholder="yourname" style="flex:1;border-radius:0.375rem 0 0 0.375rem"
-             pattern="[a-zA-Z0-9._-]+" title="Letters, digits, dots, hyphens, and underscores only">
-      <span style="display:flex;align-items:center;padding:0 0.5rem;background:var(--color-surface,#1a1a2e);border:1px solid var(--color-border,#333);border-left:none;border-radius:0">@</span>
+             placeholder="yourname"
+             pattern="[a-zA-Z0-9._-]+" title="Letters, digits, dots, hyphens, and underscores only"
+             style="flex:1;border-radius:0.375rem 0 0 0.375rem;border-right:none">
       <select name="domain" id="reg_domain" required
-              style="border-radius:0 0.375rem 0.375rem 0;min-width:200px">
+              style="border-radius:0 0.375rem 0.375rem 0;min-width:180px;border-left:1px solid var(--color-border,#333)">
         {% for d in domains %}
-        <option value="{{ d.name }}"{% if d.name == selected_domain %} selected{% endif %}>{{ d.name }}</option>
+        <option value="{{ d.name }}"{% if d.name == selected_domain %} selected{% endif %}>@{{ d.name }}</option>
         {% endfor %}
       </select>
     </div>

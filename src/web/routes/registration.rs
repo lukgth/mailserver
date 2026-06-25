@@ -1,4 +1,5 @@
 use askama::Template;
+use axum::http::StatusCode;
 use axum::{
     extract::{Path, State},
     response::{Html, IntoResponse, Redirect, Response},
@@ -217,7 +218,7 @@ pub async fn handle_form(
                     invite_code,
                     error: Some(error),
                 };
-                Html(tmpl.render().unwrap()).into_response()
+                (StatusCode::UNPROCESSABLE_ENTITY, Html(tmpl.render().unwrap())).into_response()
             }
         }
     };
@@ -287,7 +288,11 @@ pub async fn handle_form(
                     "domain": domain_name,
                 }),
             );
-            crate::web::regen_configs(&state).await;
+            // Regenerate configs in background — don't block the response
+            let state_clone = state.clone();
+            tokio::spawn(async move {
+                crate::web::regen_configs(&state_clone).await;
+            });
 
             let tmpl = ErrorTemplate {
                 nav_active: "",

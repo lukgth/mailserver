@@ -22,12 +22,14 @@ Alpine · Postfix · Dovecot · OpenDKIM · Rust · PostgreSQL
 
 - [Features](#-features)
 - [Installation](#-installation)
-  - [Method 1 — Docker Compose (recommended)](#method-1--docker-compose-recommended)
-  - [Method 2 — Docker Run](#method-2--docker-run)
-  - [Method 3 — Docker Image from Release](#method-3--docker-image-from-release)
-  - [Method 4 — Single Binary (bare metal)](#method-4--single-binary-bare-metal)
-  - [Method 5 — Auto-Provisioning (SSH)](#method-5--auto-provisioning-ssh)
-  - [Method 6 — Kubernetes Manifest (K8s providers)](#method-6--kubernetes-manifest-k8s-providers)
+  - [Method 1 — Production with Nginx + Let's Encrypt (recommended)](#method-1--production-with-nginx--lets-encrypt-recommended)
+  - [Method 2 — Docker Compose (simple)](#method-2--docker-compose-simple)
+  - [Method 3 — Docker Run](#method-3--docker-run)
+  - [Method 4 — Docker Image from Release](#method-4--docker-image-from-release)
+  - [Method 5 — Single Binary (bare metal)](#method-5--single-binary-bare-metal)
+  - [Method 6 — Auto-Provisioning (SSH)](#method-6--auto-provisioning-ssh)
+  - [Method 7 — Kubernetes Manifest (K8s providers)](#method-7--kubernetes-manifest-k8s-providers)
+- [Invite Codes](#-invite-codes)
 - [First Login](#-first-login)
 - [Admin Dashboard](#-admin-dashboard)
 - [Port Reference](#-port-reference)
@@ -69,20 +71,78 @@ Alpine · Postfix · Dovecot · OpenDKIM · Rust · PostgreSQL
 | 🖼️ **BIMI Support** | Serve per-domain SVG brand logos at `/bimi/{domain}/logo.svg` for supporting mail clients |
 | 🤖 **MCP API** | Model Context Protocol endpoint for AI assistant integration (list/read/send/delete email) |
 | 📡 **REST & SOAP APIs** | Programmatic access to mail operations via REST and SOAP endpoints |
-| 📝 **Self-Registration** | Optional user self-registration portal for invite-based account creation |
+| 📝 **Self-Registration** | Public registration page with domain dropdown and invite code gating |
+| 🎟️ **Invite Codes** | Admin-generated single-use codes required for self-registration (batches of 1–1000) |
 | 🚨 **Abuse Reporting** | Built-in abuse complaint handling and reporting |
 
 ---
 
 ## 🚀 Installation
 
-### Method 1 — Docker Compose (recommended)
+### Method 1 — Production with Nginx + Let's Encrypt (recommended)
 
-The simplest path. Docker Compose starts the mail server **and** a PostgreSQL database together with a single command. Everything — TLS certificates, DKIM keys, Postfix/Dovecot/OpenDKIM configs — is generated automatically on first start.
+Full production setup: PostgreSQL + mail server + Nginx reverse proxy (HTTPS) + automatic Let's Encrypt certificate renewal.
+
+**Prerequisites:** Docker Engine 24+, Docker Compose v2, a domain pointing to your server's public IP, and port 80/443 open.
+
+**Quick start (one command):**
+
+```bash
+git clone https://github.com/tayyebi/mailserver.git
+cd mailserver
+./quickstart.sh mail.yourdomain.com
+```
+
+This will:
+1. Create `.env` with your domain and a random DB password
+2. Request a Let's Encrypt TLS certificate (falls back to self-signed if DNS/port 80 isn't ready)
+3. Start the full stack: PostgreSQL + mail server + Nginx + Certbot
+
+**What runs:**
+
+| Service | Purpose | Ports |
+|---------|---------|-------|
+| `db` | PostgreSQL 16 | internal only |
+| `mailserver` | SMTP/IMAP/POP3 + admin dashboard | 25, 587, 465, 143, 993, 110, 995 |
+| `nginx` | HTTPS reverse proxy → dashboard | **80** (redirect), **443** (HTTPS) |
+| `certbot` | Auto-renews TLS certs every 12h | — |
+
+**Architecture:** Mail ports connect directly (no proxy). Only the admin dashboard, webmail, and registration go through Nginx (HTTPS). Rate limiting on login/registration endpoints. WebSocket support for IMAP IDLE push.
+
+**Dashboard:** `https://mail.yourdomain.com`
+
+**Self-signed (dev/testing):**
+
+```bash
+./quickstart.sh mail.example.com --self-signed
+```
+
+**Manual cert operations:**
+
+```bash
+# Force renewal
+docker compose -f docker-compose.prod.yml run --rm certbot renew
+
+# After renewal, reload nginx
+docker compose -f docker-compose.prod.yml restart nginx
+```
+
+**Upgrading:**
+
+```bash
+docker compose -f docker-compose.prod.yml pull
+docker compose -f docker-compose.prod.yml up -d
+```
+
+---
+
+### Method 2 — Docker Compose (simple)
+
+No Nginx, no HTTPS — just the mail server and PostgreSQL. Good for internal use or when you'll add your own reverse proxy.
 
 **Prerequisites:** Docker Engine 24+ and Docker Compose v2.
 
-**Step 1 — Clone the repository and create your environment file**
+**Step 1 — Clone and configure**
 
 ```bash
 git clone https://github.com/tayyebi/mailserver.git
@@ -90,35 +150,23 @@ cd mailserver
 cp .env.example .env
 ```
 
-**Step 2 — Set your hostname**
+Edit `.env` — set `HOSTNAME` and `SEED_PASS`.
 
-Open `.env` and set `HOSTNAME` to the fully-qualified domain name you'll use for mail (e.g. `mail.example.com`). Change `SEED_PASS` while you're there.
-
-```bash
-# .env (minimum required change)
-HOSTNAME=mail.example.com
-SEED_PASS=changeme
-```
-
-**Step 3 — Start the stack**
+**Step 2 — Start**
 
 ```bash
 docker compose up -d
 ```
 
-This starts two containers:
-- `db` — PostgreSQL 16 (data stored in the `maildb` volume)
-- `mailserver` — the mail server (data stored in the `maildata` volume)
-
-**Step 4 — Open the admin dashboard**
+**Step 3 — Open the dashboard**
 
 ```
 http://your-server-ip:8080
 ```
 
-Login with `admin` / `changeme` (or whatever you set in `SEED_PASS`).
+Login with `admin` / your `SEED_PASS`.
 
-**Upgrading**
+**Upgrading:**
 
 ```bash
 docker compose pull
@@ -127,7 +175,7 @@ docker compose up -d
 
 ---
 
-### Method 2 — Docker Run
+### Method 3 — Docker Run
 
 Use this if you already have a PostgreSQL instance you want to reuse.
 
@@ -166,7 +214,7 @@ http://your-server-ip:8080
 
 ---
 
-### Method 3 — Docker Image from Release
+### Method 4 — Docker Image from Release
 
 Download a pre-built Docker image from the [Releases page](https://github.com/tayyebi/mailserver/releases) — no local build needed.
 
@@ -275,11 +323,13 @@ rm /tmp/mailserver-docker.tar
 
 ---
 
-### Method 4 — Single Binary (bare metal)
+### Method 5 — Single Binary (bare metal)
 
 The `mailserver` binary is fully self-contained: config templates, database migrations, and static assets are all compiled in. You only need to install the system mail services it manages.
 
 **Supported distros:** Debian/Ubuntu (tested), Alpine, RHEL/CentOS (via `dnf`/`yum`).
+
+**Dovecot version:** The binary auto-detects the installed Dovecot version and generates compatible config (2.3 for Alpine, 2.4 for Debian 13+).
 
 #### Step 1 — Install system dependencies
 
@@ -464,7 +514,7 @@ RESET_USER=admin RESET_PASS=newpassword mailserver reset-password
 
 ---
 
-### Method 5 — Auto-Provisioning (SSH)
+### Method 6 — Auto-Provisioning (SSH)
 
 Spin up a fresh mailserver on **any Linux VPS in one command** — no manual SSH steps, no config files to write by hand. Run this from your local machine.
 
@@ -518,7 +568,7 @@ mailserver provision --host mail.example.com --user root --password s3cr3t
 
 ---
 
-### Method 6 — Kubernetes Manifest (K8s providers)
+### Method 7 — Kubernetes Manifest (K8s providers)
 
 Use the included manifest file if you deploy on Kubernetes providers (EKS/GKE/AKS, etc.).
 
@@ -550,6 +600,30 @@ Also configure DNS records for mail delivery:
 - `MX` — routes domain mail flow to your mail host
 - `PTR` — reverse DNS for the public IP (required by many receiving providers)
 - `SPF`, `DKIM`, `DMARC` — sender authentication and deliverability protection
+
+---
+
+## 🎟️ Invite Codes
+
+Self-registration is gated by invite codes. Admins generate codes from the **Invite Codes** page in the dashboard, then share them with users who want to create an account.
+
+**Admin flow:**
+1. Go to **Invite Codes** in the sidebar
+2. Enter a count (1–1000) and click **Generate**
+3. Copy the generated codes — they're shown once in a textarea, then listed as "Available" in the table
+4. Share a code with the user
+
+**User flow:**
+1. Go to `https://your-domain/register`
+2. Select a domain from the dropdown
+3. Enter the invite code, choose a username, set a password
+4. Account is created and ready to use
+
+**Key details:**
+- Codes are 16-character hex strings, single-use
+- Admin-only: generating, listing, and deleting codes requires admin authentication
+- Old `/register/:domain` URLs redirect to `/register` automatically
+- No codes exist by default — the admin must generate them first
 
 ---
 

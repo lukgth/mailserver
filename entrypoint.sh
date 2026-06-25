@@ -14,6 +14,11 @@ if [ ! -f /data/ssl/cert.pem ] || [ ! -f /data/ssl/dh.pem ]; then
     /usr/local/bin/mailserver gencerts
 else
     echo "[entrypoint] INFO: TLS certificates and DH parameters already exist, skipping generation"
+    # Ensure symlink exists for dovecot (may be missing if gencerts was skipped)
+    if [ ! -L /usr/share/dovecot/dh.pem ] && [ ! -f /usr/share/dovecot/dh.pem ]; then
+        echo "[entrypoint] INFO: creating symlink for DH parameters"
+        ln -sf /data/ssl/dh.pem /usr/share/dovecot/dh.pem
+    fi
 fi
 
 echo "[entrypoint] INFO: seeding database"

@@ -1,0 +1,72 @@
+# Docker Compose for integration testing.
+# Starts the mail server with a test database, runs checks, then tears down.
+#
+# Usage:
+#   docker compose -f docker-compose.test.yml up --build --abort-on-container-exit --exit-code-from test
+#   docker compose -f docker-compose.test.yml down -v
+
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: mailserver_test
+      POSTGRES_USER: mailserver
+      POSTGRES_PASSWORD: mailserver
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U mailserver"]
+      interval: 2s
+      timeout: 5s
+      retries: 10
+    tmpfs:
+      - /var/lib/postgresql/data
+
+  mailserver:
+    build: .
+    depends_on:
+      db:
+        condition: service_healthy
+    env_file: .env.test
+    environment:
+      DATABASE_URL: postgres://mailserver:mailserver@db/mailserver_test
+      HOSTNAME: mail.test.local
+      ADMIN_PORT: "8080"
+      SEED_USER: admin
+      SEED_PASS: admin
+    ports:
+      - "2525:25"
+      - "5875:587"
+      - "4655:465"
+      - "1143:143"
+      - "1993:993"
+      - "1110:110"
+      - "1995:995"
+      - "18080:8080"
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8080/"]
+      interval: 3s
+      timeout: 5s
+      retries: 20
+      start_period: 30s
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+
+  test:
+    image: alpine:3.21
+    depends_on:
+      mailserver:
+        condition: service_healthy
+    entrypoint: /bin/sh /tests/run.sh
+    volumes:
+      - ./tests:/tests:ro
+    environment:
+      MAIL_HOST: mailserver
+      SMTP_PORT: "25"
+      SUBMISSION_PORT: "587"
+      SMTPS_PORT: "465"
+      IMAP_PORT: "143"
+      IMAPS_PORT: "993"
+      POP3_PORT: "110"
+      POP3S_PORT: "995"
+      HTTP_PORT: "8080"
+      ADMIN_USER: admin
+      ADMIN_PASS: admin

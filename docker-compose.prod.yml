@@ -83,7 +83,7 @@ services:
     volumes:
       - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
       - ./nginx/proxy_params.conf:/etc/nginx/proxy_params.conf:ro
-      - ./nginx/certs:/etc/nginx/certs:ro
+      - ./nginx/certs:/etc/letsencrypt:ro
       - certbot-www:/var/www/certbot:ro
     restart: unless-stopped
     networks:
@@ -107,6 +107,11 @@ networks:
     driver: bridge
 
 volumes:
+  # External volumes — NOT removed by `docker compose down -v`.
+  # Created manually on first deploy: docker volume create maildata && docker volume create maildb
   maildata:
+    external: true
   maildb:
+    external: true
+  # Ephemeral — safe to remove on down
   certbot-www:

@@ -13,10 +13,11 @@ services:
       POSTGRES_USER: mailserver
       POSTGRES_PASSWORD: mailserver
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U mailserver"]
+      test: ["CMD-SHELL", "pg_isready -U mailserver -d mailserver_test"]
       interval: 2s
       timeout: 5s
-      retries: 10
+      retries: 30
+      start_period: 10s
     tmpfs:
       - /var/lib/postgresql/data
 

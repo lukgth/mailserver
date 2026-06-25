@@ -33,3 +33,7 @@ tmp/
 # Docker
 docker-compose.override.yml
 *-docker.tar
+
+# TLS certs (generated)
+nginx/certs/*.pem
+nginx/certs/*.key

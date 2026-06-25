@@ -1,0 +1,109 @@
+# Production Docker Compose — mail server + nginx reverse proxy (HTTPS).
+#
+# Usage:
+#   1. cp .env.example .env   (edit HOSTNAME, SEED_PASS, etc.)
+#   2. ./nginx/generate-self-signed-cert.sh mail.yourdomain.com
+#   3. docker compose -f docker-compose.prod.yml up -d
+#
+# What runs:
+#   - db:            PostgreSQL 16
+#   - mailserver:    Mail server (SMTP/IMAP/POP3 + admin dashboard)
+#   - nginx:         Reverse proxy — HTTPS on 443, HTTP→HTTPS redirect on 80
+#
+# Ports:
+#   443  — HTTPS (admin dashboard, webmail, registration)
+#   80   — HTTP (redirects to HTTPS)
+#   25   — SMTP (direct, no proxy)
+#   587  — Submission (direct)
+#   465  — SMTPS (direct)
+#   143  — IMAP (direct)
+#   993  — IMAPS (direct)
+#   110  — POP3 (direct)
+#   995  — POP3S (direct)
+
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: mailserver
+      POSTGRES_USER: mailserver
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-changeme}
+    volumes:
+      - maildb:/var/lib/postgresql/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U mailserver"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  mailserver:
+    image: ghcr.io/tayyebi/mailserver:main
+    build: .
+    depends_on:
+      db:
+        condition: service_healthy
+    env_file: .env
+    environment:
+      DATABASE_URL: postgres://mailserver:mailserver@db/mailserver
+      HOSTNAME: ${HOSTNAME:-mail.example.com}
+      ADMIN_PORT: "8080"
+      PIXEL_BASE_URL: https://${HOSTNAME:-mail.example.com}/pixel?id=
+      SEED_USER: ${SEED_USER:-admin}
+      SEED_PASS: ${SEED_PASS:-admin}
+      TZ: ${TZ:-UTC}
+    # Mail ports — exposed directly, not proxied
+    ports:
+      - "${SMTP_PORT:-25}:25"
+      - "${SUBMISSION_PORT:-587}:587"
+      - "${SMTPS_PORT:-465}:465"
+      - "${SMTP_ALT_PORT:-2525}:2525"
+      - "${IMAP_PORT:-143}:143"
+      - "${IMAPS_PORT:-993}:993"
+      - "${POP3_PORT:-110}:110"
+      - "${POP3S_PORT:-995}:995"
+    volumes:
+      - maildata:/data
+      - /var/run/docker.sock:/var/run/docker.sock
+    restart: unless-stopped
+    networks:
+      - internal
+      - mail
+
+  nginx:
+    image: nginx:alpine
+    depends_on:
+      - mailserver
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/proxy_params.conf:/etc/nginx/proxy_params.conf:ro
+      - ./nginx/certs:/etc/nginx/certs:ro
+      - certbot-www:/var/www/certbot:ro
+    restart: unless-stopped
+    networks:
+      - internal
+
+  # Optional: Let's Encrypt certbot.
+  # Uncomment to auto-renew TLS certificates.
+  # certbot:
+  #   image: certbot/certbot
+  #   volumes:
+  #     - certbot-www:/var/www/certbot
+  #     - ./nginx/certs:/etc/letsencrypt
+  #   entrypoint: "/bin/sh -c 'trap exit TERM; while :; do certbot renew; sleep 12h & wait $${!}; done;'"
+  #   networks:
+  #     - internal
+
+networks:
+  internal:
+    driver: bridge
+  mail:
+    driver: bridge
+
+volumes:
+  maildata:
+  maildb:
+  certbot-www:

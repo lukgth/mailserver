@@ -2,6 +2,7 @@ use crate::db::Database;
 use chrono::Utc;
 use log::{debug, error, info, warn};
 use std::collections::HashSet;
+use std::env;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};

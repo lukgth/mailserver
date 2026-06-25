@@ -1028,6 +1028,28 @@ impl Database {
         }
     }
 
+    pub fn cleanup_used_invite_codes(&self) {
+        info!("[db] cleaning up used invite codes for deleted accounts");
+        let mut conn = self.conn();
+        // Delete invite codes where the used_by account no longer exists
+        let query = "DELETE FROM invite_codes WHERE used_by IS NOT NULL
+                     AND NOT EXISTS (
+                         SELECT 1 FROM accounts a
+                         JOIN domains d ON a.domain_id = d.id
+                         WHERE a.username || '@' || d.domain = invite_codes.used_by
+                     )";
+        match conn.execute(query, &[]) {
+            Ok(n) => {
+                if n > 0 {
+                    info!("[db] cleaned up {} orphaned invite codes", n);
+                }
+            }
+            Err(e) => {
+                error!("[db] failed to clean up invite codes: {}", e);
+            }
+        }
+    }
+
     pub fn create_domain(
         &self,
         domain: &str,
@@ -1258,6 +1280,8 @@ impl Database {
                 return;
             }
         }
+        // Clean up any invite codes that referenced this account
+        self.cleanup_used_invite_codes();
     }
 
     pub fn list_all_accounts_with_domain(&self) -> Vec<Account> {

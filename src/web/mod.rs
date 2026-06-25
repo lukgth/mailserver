@@ -279,14 +279,11 @@ pub(crate) async fn regen_configs(state: &AppState) {
     info!("[web] regenerating mail service configs");
     let db = state.db.clone();
     let hostname = state.hostname.clone();
-    let (tx, rx) = tokio::sync::oneshot::channel();
-
-    std::thread::spawn(move || {
-        crate::config::generate_all_configs(&db, &hostname);
-        let _ = tx.send(());
+    tokio::spawn(async move {
+        tokio::task::spawn_blocking(move || {
+            crate::config::generate_all_configs(&db, &hostname);
+        }).await.ok();
     });
-
-    let _ = rx.await;
 }
 
 /// Fire a webhook notification for a system activity event.

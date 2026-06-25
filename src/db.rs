@@ -925,7 +925,7 @@ impl Database {
 
     pub fn get_registration_domains(&self) -> Vec<Domain> {
         info!("[db] listing registration-enabled domains");
-        let conn = self.conn();
+        let mut conn = self.conn();
         let rows = conn
             .query(
                 "SELECT id, domain, active, dkim_selector, dkim_private_key, dkim_public_key,
@@ -977,7 +977,7 @@ impl Database {
 
     pub fn list_invite_codes(&self) -> Vec<InviteCode> {
         info!("[db] listing invite codes");
-        let conn = self.conn();
+        let mut conn = self.conn();
         let rows = conn
             .query(
                 "SELECT id, code, used_by, used_at, created_by, created_at

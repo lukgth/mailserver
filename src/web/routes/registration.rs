@@ -266,9 +266,11 @@ pub async fn handle_form(
 
     let domain_name = domain_obj.domain.clone();
     let domain_id = domain_obj.id;
+    let username_clone = username.clone();
+    let name_clone = name.clone();
 
     let result = state
-        .blocking_db(move |db| db.create_account(domain_id, &username, &hash, &name, 0))
+        .blocking_db(move |db| db.create_account(domain_id, &username_clone, &hash, &name_clone, 0))
         .await;
 
     match result {

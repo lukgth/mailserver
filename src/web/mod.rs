@@ -279,10 +279,11 @@ pub(crate) async fn regen_configs(state: &AppState) {
     info!("[web] regenerating mail service configs");
     let db = state.db.clone();
     let hostname = state.hostname.clone();
-    tokio::spawn(async move {
-        tokio::task::spawn_blocking(move || {
-            crate::config::generate_all_configs(&db, &hostname);
-        }).await.ok();
+    // Spawn a raw thread — NOT tokio::spawn. The sync postgres client
+    // creates its own tokio runtime internally and panics if called
+    // from within an existing tokio runtime.
+    std::thread::spawn(move || {
+        crate::config::generate_all_configs(&db, &hostname);
     });
 }
 

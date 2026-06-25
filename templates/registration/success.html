@@ -1,0 +1,31 @@
+{% extends "layout.html" %}
+{% block title %}Account Created{% endblock %}
+{% block content %}
+<h1>✓ Account Created</h1>
+<p>Your mailbox <strong>{{ email }}</strong> is ready to use.</p>
+
+<h2>Mail Client Settings</h2>
+<p>Use these settings to connect from Thunderbird, Outlook, Apple Mail, or any email app.</p>
+
+<table>
+<thead>
+  <tr><th>Protocol</th><th>Server</th><th>Port</th><th>Security</th><th>Username</th></tr>
+</thead>
+<tbody>
+  <tr><td><strong>IMAP</strong> (recommended)</td><td>{{ hostname }}</td><td>993</td><td>TLS/SSL</td><td>{{ email }}</td></tr>
+  <tr><td>IMAP (plain)</td><td>{{ hostname }}</td><td>143</td><td>STARTTLS</td><td>{{ email }}</td></tr>
+  <tr><td>POP3</td><td>{{ hostname }}</td><td>995</td><td>TLS/SSL</td><td>{{ email }}</td></tr>
+  <tr><td><strong>SMTP</strong> (sending)</td><td>{{ hostname }}</td><td>465</td><td>TLS/SSL</td><td>{{ email }}</td></tr>
+  <tr><td>SMTP (submission)</td><td>{{ hostname }}</td><td>587</td><td>STARTTLS</td><td>{{ email }}</td></tr>
+</tbody>
+</table>
+
+<h2>Password</h2>
+<p>Your password is the one you just set during registration. Write it down — it cannot be recovered.</p>
+
+<h2>Quick Links</h2>
+<ul>
+  <li><a href="/webmail">Webmail</a> — read email in your browser</li>
+  <li><a href="/register">Create another account</a></li>
+</ul>
+{% endblock %}

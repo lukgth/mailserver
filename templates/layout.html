@@ -5,25 +5,22 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{% block title %}Mailserver{% endblock %}</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap">
 <link rel="stylesheet" href="/static/style.css">
 <link rel="stylesheet" href="/static/desktop.css" media="(min-width: 768px)">
 </head>
 <body>
+{% if nav_active != "" %}
 <input type="checkbox" id="nav-toggle" class="nav-toggle">
 <label for="nav-toggle" class="nav-overlay" aria-hidden="true"></label>
 <header>
   <label for="nav-toggle" class="nav-burger" aria-label="Toggle navigation">
-    <span></span>
-    <span></span>
-    <span></span>
+    <span></span><span></span><span></span>
   </label>
   <strong>Mailserver</strong>
   <small>Control Panel</small>
   <nav>
     <a href="/"{% if nav_active == "Dashboard" %} aria-current="page"{% endif %}>Dashboard</a>
-
     <div class="nav-group">
       <span class="nav-group-label">Mail</span>
       <a href="/domains"{% if nav_active == "Domains" %} aria-current="page"{% endif %}>Domains</a>
@@ -32,7 +29,6 @@
       <a href="/forwarding"{% if nav_active == "Forwarding" %} aria-current="page"{% endif %}>Forwarding</a>
       <a href="/relays"{% if nav_active == "Relays" %} aria-current="page"{% endif %}>Relays</a>
     </div>
-
     <div class="nav-group">
       <span class="nav-group-label">Processing</span>
       <a href="/queue"{% if nav_active == "Queue" %} aria-current="page"{% endif %}>Queue</a>
@@ -46,7 +42,6 @@
       <a href="/bounce"{% if nav_active == "Bounces" %} aria-current="page"{% endif %}>Bounces</a>
       <a href="/fail2ban"{% if nav_active == "Fail2ban" %} aria-current="page"{% endif %}>Fail2ban</a>
     </div>
-
     <div class="nav-group">
       <span class="nav-group-label">Clients</span>
       <a href="/webmail"{% if nav_active == "Webmail" %} aria-current="page"{% endif %}>Webmail</a>
@@ -55,14 +50,12 @@
       <a href="/carddav"{% if nav_active == "CardDAV" %} aria-current="page"{% endif %}>CardDAV</a>
       <a href="/webdav"{% if nav_active == "WebDAV" %} aria-current="page"{% endif %}>WebDAV</a>
     </div>
-
     <div class="nav-group">
       <span class="nav-group-label">Integration</span>
       <a href="/api"{% if nav_active == "API" %} aria-current="page"{% endif %}>API</a>
       <a href="/webhooks"{% if nav_active == "Webhooks" %} aria-current="page"{% endif %}>Webhooks</a>
       <a href="/mcp"{% if nav_active == "MCP" %} aria-current="page"{% endif %}>MCP</a>
     </div>
-
     <div class="nav-group">
       <span class="nav-group-label">System</span>
       <a href="/invite-codes"{% if nav_active == "Invite Codes" %} aria-current="page"{% endif %}>Invite Codes</a>
@@ -72,6 +65,7 @@
     </div>
   </nav>
 </header>
+{% endif %}
 <div class="page-wrapper">
 <main>
 {% if let Some(msg) = flash %}<output>{{ msg }}</output>{% endif %}
@@ -79,9 +73,8 @@
 </main>
 <footer><small>Mailserver Admin</small></footer>
 </div>
+{% if nav_active != "" %}
 <script>
-// Client-side table sorting for all [data-sortable] tables.
-// Skips tables whose headers already contain links (e.g. webmail with server-side sort).
 (function () {
   document.querySelectorAll("table").forEach(function (table) {
     var tbody = table.querySelector("tbody");
@@ -91,75 +84,47 @@
     var thead = table.querySelector("thead");
     if (!thead) return;
     var ths = thead.querySelectorAll("th");
-    // Skip last column (Actions) — never sort by it.
     var sortable = Array.from(ths).slice(0, -1);
     if (sortable.length === 0) return;
-    // Skip if any header already has a link (server-side sort).
     if (sortable.some(function (th) { return th.querySelector("a"); })) return;
-
     var currentDir = table.getAttribute("data-sort-dir") || "desc";
     var currentCol = parseInt(table.getAttribute("data-sort-col"));
     if (isNaN(currentCol)) {
-      // Auto-detect date/time column by header keywords
       var dateKw = ["date", "time", "added", "arrival", "created", "banned", "unsubscribed", "sent"];
       currentCol = 0;
       sortable.some(function (th, i) {
         var label = th.textContent.trim().toLowerCase();
-        if (dateKw.some(function (kw) { return label.indexOf(kw) !== -1; })) {
-          currentCol = i;
-          return true;
-        }
+        if (dateKw.some(function (kw) { return label.indexOf(kw) !== -1; })) { currentCol = i; return true; }
         return false;
       });
     }
-
     function getVal(row, col) {
-      var cell = row.children[col];
-      if (!cell) return "";
-      var text = cell.textContent.trim();
-      var d = Date.parse(text);
-      if (!isNaN(d)) return d;
-      var n = parseFloat(text.replace(/[^0-9.\-]/g, ""));
-      if (!isNaN(n)) return n;
-      return text.toLowerCase();
+      var cell = row.children[col]; if (!cell) return "";
+      var text = cell.textContent.trim(); var d = Date.parse(text);
+      if (!isNaN(d)) return d; var n = parseFloat(text.replace(/[^0-9.\-]/g, ""));
+      if (!isNaN(n)) return n; return text.toLowerCase();
     }
-
     function sortTable(col, dir) {
-      currentCol = col;
-      currentDir = dir;
+      currentCol = col; currentDir = dir;
       var sorted = rows.slice().sort(function (a, b) {
-        var va = getVal(a, col);
-        var vb = getVal(b, col);
-        if (typeof va === "number" && typeof vb === "number") {
-          return dir === "asc" ? va - vb : vb - va;
-        }
-        if (va < vb) return dir === "asc" ? -1 : 1;
-        if (va > vb) return dir === "asc" ? 1 : -1;
-        return 0;
+        var va = getVal(a, col), vb = getVal(b, col);
+        if (typeof va === "number" && typeof vb === "number") return dir === "asc" ? va - vb : vb - va;
+        if (va < vb) return dir === "asc" ? -1 : 1; if (va > vb) return dir === "asc" ? 1 : -1; return 0;
       });
       sorted.forEach(function (row) { tbody.appendChild(row); });
       sortable.forEach(function (th, i) {
-        var s = th.querySelector(".sort-indicator");
-        if (s) s.remove();
-        if (i === col) {
-          var span = document.createElement("span");
-          span.className = "sort-indicator";
-          span.textContent = dir === "asc" ? " ▲" : " ▼";
-          th.appendChild(span);
-        }
+        var s = th.querySelector(".sort-indicator"); if (s) s.remove();
+        if (i === col) { var span = document.createElement("span"); span.className = "sort-indicator"; span.textContent = dir === "asc" ? " ▲" : " ▼"; th.appendChild(span); }
       });
     }
-
     sortable.forEach(function (th, i) {
       th.style.cursor = "pointer";
-      th.addEventListener("click", function () {
-        sortTable(i, i === currentCol && currentDir === "desc" ? "asc" : "desc");
-      });
+      th.addEventListener("click", function () { sortTable(i, i === currentCol && currentDir === "desc" ? "asc" : "desc"); });
     });
-
     sortTable(currentCol, currentDir);
   });
 })();
 </script>
+{% endif %}
 </body>
 </html>

@@ -56,6 +56,15 @@ struct ErrorTemplate<'a> {
     back_label: &'a str,
 }
 
+#[derive(Template)]
+#[template(path = "registration/success.html")]
+struct SuccessTemplate<'a> {
+    nav_active: &'a str,
+    flash: Option<&'a str>,
+    email: String,
+    hostname: &'a str,
+}
+
 // ── Helpers ──
 
 fn validate_username(username: &str, regex_pattern: &str) -> Result<(), String> {
@@ -294,18 +303,11 @@ pub async fn handle_form(
                 crate::web::regen_configs(&state_clone).await;
             });
 
-            let tmpl = ErrorTemplate {
+            let tmpl = SuccessTemplate {
                 nav_active: "",
                 flash: None,
-                status_code: 200,
-                status_text: "OK",
-                title: "Account Created",
-                message: &format!(
-                    "Your mailbox {}@{} has been created successfully. You can now log in.",
-                    username, domain_name
-                ),
-                back_url: "/",
-                back_label: "Home",
+                email: format!("{}@{}", username, domain_name),
+                hostname: &state.hostname,
             };
             Html(tmpl.render().unwrap()).into_response()
         }

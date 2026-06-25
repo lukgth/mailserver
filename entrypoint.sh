@@ -9,7 +9,7 @@ echo "[entrypoint] INFO: ensuring required system users exist"
 id vmail >/dev/null 2>&1 || { echo "[entrypoint] INFO: creating vmail user"; addgroup -S vmail 2>/dev/null; adduser -S -D -H -G vmail -s /sbin/nologin vmail 2>/dev/null; }
 id opendkim >/dev/null 2>&1 || { echo "[entrypoint] INFO: creating opendkim user"; addgroup -S opendkim 2>/dev/null; adduser -S -D -H -G opendkim -s /sbin/nologin opendkim 2>/dev/null; }
 
-if [ ! -f /data/ssl/cert.pem ] || [ ! -f /usr/share/dovecot/dh.pem ]; then
+if [ ! -f /data/ssl/cert.pem ] || [ ! -f /data/ssl/dh.pem ]; then
     echo "[entrypoint] INFO: generating TLS certificates and DH parameters for hostname=${HOSTNAME:-mailserver}"
     /usr/local/bin/mailserver gencerts
 else

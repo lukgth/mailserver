@@ -1767,36 +1767,36 @@ pub fn generate_tls_certificate(hostname: &str, force: bool) -> Result<(), Strin
 }
 
 pub fn generate_dh_parameters() -> Result<(), String> {
-    let dh_path = "/usr/share/dovecot/dh.pem";
+    // Store DH params on persistent volume so they survive container recreation
+    let persistent_dh = "/data/ssl/dh.pem";
+    let dovecot_dh = "/usr/share/dovecot/dh.pem";
 
-    // Check if DH parameters already exist
-    if Path::new(dh_path).exists() {
+    // Check if DH parameters already exist on persistent volume
+    if Path::new(persistent_dh).exists() {
         info!(
             "[config] DH parameters already exist at {}, skipping generation",
-            dh_path
+            persistent_dh
         );
+        // Ensure symlink exists for dovecot
+        ensure_dh_symlink(persistent_dh, dovecot_dh);
         return Ok(());
     }
 
     info!("[config] generating Diffie-Hellman parameters (this may take a while)");
 
-    // Create dovecot directory if it doesn't exist
-    if let Err(e) = fs::create_dir_all("/usr/share/dovecot") {
-        error!(
-            "[config] failed to create /usr/share/dovecot directory: {}",
-            e
-        );
-        return Err(format!("failed to create directory: {}", e));
-    }
+    // Create directories
+    let _ = fs::create_dir_all("/data/ssl");
+    let _ = fs::create_dir_all("/usr/share/dovecot");
 
-    // Generate DH parameters
+    // Generate DH parameters to persistent volume
     let result = Command::new("openssl")
-        .args(["dhparam", "-out", dh_path, "2048"])
+        .args(["dhparam", "-out", persistent_dh, "2048"])
         .output();
 
     match result {
         Ok(output) if output.status.success() => {
             info!("[config] DH parameters generated successfully");
+            ensure_dh_symlink(persistent_dh, dovecot_dh);
             Ok(())
         }
         Ok(output) => {
@@ -1808,6 +1808,16 @@ pub fn generate_dh_parameters() -> Result<(), String> {
             error!("[config] failed to run openssl dhparam: {}", e);
             Err(format!("failed to run openssl dhparam: {}", e))
         }
+    }
+}
+
+/// Ensure a symlink points from dovecot_dh to persistent_dh.
+fn ensure_dh_symlink(persistent: &str, dovecot_path: &str) {
+    // Remove existing file/symlink at dovecot path
+    let _ = fs::remove_file(dovecot_path);
+    match std::os::unix::fs::symlink(persistent, dovecot_path) {
+        Ok(_) => info!("[config] symlinked {} -> {}", dovecot_path, persistent),
+        Err(e) => warn!("[config] failed to symlink DH params: {} (non-fallback)", e),
     }
 }
 

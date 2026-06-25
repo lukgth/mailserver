@@ -43,7 +43,7 @@ services:
       - "1995:995"
       - "18080:8080"
     healthcheck:
-      test: ["CMD", "curl", "-sf", "http://localhost:8080/"]
+      test: ["CMD-SHELL", "curl -s -o /dev/null http://localhost:8080/"]
       interval: 3s
       timeout: 5s
       retries: 20

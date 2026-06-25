@@ -140,6 +140,16 @@ fn dovecot_config_version_line() -> String {
     String::new()
 }
 
+/// Returns the Dovecot storage version line for the dovecot.conf template.
+/// Dovecot 2.4 requires this header line.
+fn dovecot_storage_version_line() -> String {
+    let version = env::var("DOVECOT_STORAGE_VERSION").unwrap_or_else(|_| {
+        info!("[config] DOVECOT_STORAGE_VERSION not set, defaulting to 2.4.0");
+        "2.4.0".to_string()
+    });
+    format!("dovecot_storage_version = {}\n", version)
+}
+
 /// Write content to a file with secure permissions (0600 - owner read/write only)
 /// This is used for sensitive files like DKIM private keys and password databases
 ///
@@ -729,6 +739,10 @@ pub fn generate_dovecot_conf(hostname: &str) {
 
     let config = template
         .replace("{{ dovecot_config_version_line }}", &dovecot_config_version_line())
+        .replace(
+            "{{ dovecot_storage_version_line }}",
+            &dovecot_storage_version_line(),
+        )
         .replace("{{ generated_at }}", &generated_at())
         .replace("{{ hostname }}", hostname)
         .replace("{{ log_path_line }}", log_path_line);

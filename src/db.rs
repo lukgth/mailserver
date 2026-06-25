@@ -8,6 +8,14 @@ fn now() -> String {
     chrono::Utc::now().format("%Y-%m-%d %H:%M:%S").to_string()
 }
 
+fn generate_invite_code() -> String {
+    use rand::Rng;
+    let mut rng = rand::thread_rng();
+    (0..16)
+        .map(|_| format!("{:x}", rng.gen_range(0..16)))
+        .collect()
+}
+
 #[derive(Clone)]
 pub struct Database {
     conn: Arc<Mutex<Client>>,
@@ -42,6 +50,16 @@ pub struct UnsubscribeEntry {
     pub id: i64,
     pub email: String,
     pub domain: String,
+    pub created_at: String,
+}
+
+#[derive(Clone, Serialize)]
+pub struct InviteCode {
+    pub id: i64,
+    pub code: String,
+    pub used_by: Option<String>,
+    pub used_at: Option<String>,
+    pub created_by: String,
     pub created_at: String,
 }
 
@@ -518,6 +536,7 @@ fn embedded_migrations() -> Vec<(String, String)> {
         ("018_carddav".into(), include_str!("../migrations/018_carddav.sql").into()),
         ("019_bounce_inboxes".into(), include_str!("../migrations/019_bounce_inboxes.sql").into()),
         ("020_jmap".into(), include_str!("../migrations/020_jmap.sql").into()),
+        ("021_invite_codes".into(), include_str!("../migrations/021_invite_codes.sql").into()),
     ];
     m.sort_by(|a, b| a.0.cmp(&b.0));
     m
@@ -902,6 +921,111 @@ impl Database {
             registration_enabled: row.get::<_, Option<bool>>(9).unwrap_or(false),
             registration_username_regex: row.get::<_, Option<String>>(10).unwrap_or_default(),
         })
+    }
+
+    pub fn get_registration_domains(&self) -> Vec<Domain> {
+        info!("[db] listing registration-enabled domains");
+        let conn = self.conn();
+        let rows = conn
+            .query(
+                "SELECT id, domain, active, dkim_selector, dkim_private_key, dkim_public_key,
+                        footer_html, bimi_svg, unsubscribe_enabled, registration_enabled,
+                        registration_username_regex
+                 FROM domains
+                 WHERE active = TRUE AND registration_enabled = TRUE
+                 ORDER BY domain",
+                &[],
+            )
+            .unwrap_or_default();
+        rows.iter()
+            .map(|row| Domain {
+                id: row.get(0),
+                domain: row.get(1),
+                active: row.get(2),
+                dkim_selector: row.get(3),
+                dkim_private_key: row.get(4),
+                dkim_public_key: row.get(5),
+                footer_html: row.get(6),
+                bimi_svg: row.get(7),
+                unsubscribe_enabled: row.get(8),
+                registration_enabled: row.get::<_, Option<bool>>(9).unwrap_or(false),
+                registration_username_regex: row.get::<_, Option<String>>(10).unwrap_or_default(),
+            })
+            .collect()
+    }
+
+    pub fn create_invite_codes(&self, count: usize, created_by: &str) -> Vec<String> {
+        info!("[db] creating {} invite codes by {}", count, created_by);
+        let mut conn = self.conn();
+        let ts = now();
+        let mut codes = Vec::with_capacity(count);
+        for _ in 0..count {
+            let code = generate_invite_code();
+            if conn
+                .execute(
+                    "INSERT INTO invite_codes (code, created_by, created_at) VALUES ($1, $2, $3)",
+                    &[&code, &created_by, &ts],
+                )
+                .is_ok()
+            {
+                codes.push(code);
+            }
+        }
+        info!("[db] created {} invite codes", codes.len());
+        codes
+    }
+
+    pub fn list_invite_codes(&self) -> Vec<InviteCode> {
+        info!("[db] listing invite codes");
+        let conn = self.conn();
+        let rows = conn
+            .query(
+                "SELECT id, code, used_by, used_at, created_by, created_at
+                 FROM invite_codes
+                 ORDER BY id DESC",
+                &[],
+            )
+            .unwrap_or_default();
+        rows.iter()
+            .map(|row| InviteCode {
+                id: row.get(0),
+                code: row.get(1),
+                used_by: row.get(2),
+                used_at: row.get(3),
+                created_by: row.get(4),
+                created_at: row.get(5),
+            })
+            .collect()
+    }
+
+    pub fn use_invite_code(&self, code: &str, used_by: &str) -> bool {
+        info!("[db] attempting to use invite code: {}", code);
+        let mut conn = self.conn();
+        let ts = now();
+        let result = conn.execute(
+            "UPDATE invite_codes SET used_by = $1, used_at = $2
+             WHERE code = $3 AND used_by IS NULL",
+            &[&used_by, &ts, &code],
+        );
+        match result {
+            Ok(n) => {
+                let used = n > 0;
+                info!("[db] invite code {} used={}", code, used);
+                used
+            }
+            Err(e) => {
+                error!("[db] failed to use invite code {}: {}", code, e);
+                false
+            }
+        }
+    }
+
+    pub fn delete_invite_code(&self, id: i64) {
+        info!("[db] deleting invite code id={}", id);
+        let mut conn = self.conn();
+        if let Err(e) = conn.execute("DELETE FROM invite_codes WHERE id = $1", &[&id]) {
+            error!("[db] failed to delete invite code {}: {}", id, e);
+        }
     }
 
     pub fn create_domain(

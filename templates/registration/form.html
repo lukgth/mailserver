@@ -1,11 +1,22 @@
 {% extends "layout.html" %}
-{% block title %}Register — {{ domain }}{% endblock %}
+{% block title %}Register{% endblock %}
 {% block content %}
-<h1>Create a mailbox on {{ domain }}</h1>
+<h1>Create a Mailbox</h1>
 {% if let Some(error) = error %}
 <p><strong style="color:var(--color-danger,red)">{{ error }}</strong></p>
 {% endif %}
-<form method="post" action="/register/{{ domain }}">
+<form method="post" action="/register">
+  <label>Domain<br>
+    <select name="domain" id="reg_domain" required>
+    {% for d in domains %}
+      <option value="{{ d.name }}"{% if d.name == selected_domain %} selected{% endif %}>{{ d.name }}</option>
+    {% endfor %}
+    </select>
+  </label>
+  <label>Invite Code<br>
+    <input type="text" name="invite_code" value="{{ invite_code }}" required
+           placeholder="e.g. a1b2c3d4e5f6g7h8" autocomplete="off">
+  </label>
   <label>Username (the part before @)<br>
     <input type="text" name="username" id="reg_username" value="{{ username }}" required autocomplete="username"
            placeholder="yourname"
@@ -27,13 +38,14 @@
 (function() {
   var input = document.getElementById('reg_username');
   var preview = document.getElementById('reg_preview');
-  var domain = '{{ domain }}';
-  if (input && preview) {
-    input.addEventListener('input', function() {
-      var u = input.value.trim() || '';
-      preview.textContent = u ? u + '@' + domain : '@' + domain;
-    });
+  var domainSelect = document.getElementById('reg_domain');
+  function updatePreview() {
+    var u = input.value.trim() || '';
+    var d = domainSelect.value || '';
+    preview.textContent = u ? u + '@' + d : '@' + d;
   }
+  if (input) input.addEventListener('input', updatePreview);
+  if (domainSelect) domainSelect.addEventListener('change', updatePreview);
 })();
 </script>
 {% endblock %}

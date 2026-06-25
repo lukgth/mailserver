@@ -1,0 +1,53 @@
+{% extends "layout.html" %}
+{% block title %}Invite Codes{% endblock %}
+{% block content %}
+<h1>Invite Codes</h1>
+
+{% if let Some(flash) = flash %}
+<p style="color:var(--color-success,green)"><strong>{{ flash }}</strong></p>
+{% endif %}
+
+<h2>Generate Codes</h2>
+<form method="post" action="/invite-codes/generate" style="display:flex;gap:0.5rem;align-items:end;margin-bottom:1.5rem">
+  <label>Count<br>
+    <input type="number" name="count" value="10" min="1" max="1000" required style="width:100px">
+  </label>
+  <button type="submit">Generate</button>
+</form>
+
+{% if !new_codes.is_empty() %}
+<h2>Newly Generated</h2>
+<p>Copy these codes — they won't be shown again in this format.</p>
+<textarea readonly rows="{% if new_codes.len() > 20 %}20{% else %}{{ new_codes.len() + 1 }}{% endif %}" style="width:100%;font-family:monospace">{% for c in new_codes %}{{ c }}
+{% endfor %}</textarea>
+<hr>
+{% endif %}
+
+<h2>All Codes ({{ codes.len() }})</h2>
+<table>
+<thead>
+  <tr><th>Code</th><th>Status</th><th>Used By</th><th>Created</th><th></th></tr>
+</thead>
+<tbody>
+{% for c in codes %}
+  <tr>
+    <td><code>{{ c.code }}</code></td>
+    <td>{{ c.status }}</td>
+    <td>{{ c.used_by }}</td>
+    <td>{{ c.created_at }}</td>
+    <td>
+      {% if c.status == "Available" %}
+      <form method="post" action="/invite-codes/{{ c.id }}/delete" style="display:inline"
+            onsubmit="return confirm('Delete this code?')">
+        <button type="submit" style="color:var(--color-danger,red)">Delete</button>
+      </form>
+      {% endif %}
+    </td>
+  </tr>
+{% endfor %}
+{% if codes.is_empty() %}
+  <tr><td colspan="5"><em>No invite codes yet.</em></td></tr>
+{% endif %}
+</tbody>
+</table>
+{% endblock %}

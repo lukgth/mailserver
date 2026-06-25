@@ -16,6 +16,7 @@ pub mod fail2ban;
 pub mod footer;
 pub mod forwarding;
 pub mod imap_idle;
+pub mod invite_codes;
 pub mod mcp;
 pub mod pixel;
 pub mod queue;
@@ -130,6 +131,9 @@ pub fn auth_routes() -> Router<AppState> {
             "/settings/restart-container",
             post(settings::restart_container),
         )
+        .route("/invite-codes", get(invite_codes::list))
+        .route("/invite-codes/generate", post(invite_codes::generate))
+        .route("/invite-codes/:id/delete", post(invite_codes::delete_code))
         .route("/configs", get(configs::page))
         .route("/api", get(api_docs::page))
         .route("/api/token/generate", post(api_docs::generate_token))
@@ -224,7 +228,8 @@ pub fn auth_routes() -> Router<AppState> {
 pub fn registration_routes() -> Router<AppState> {
     Router::new()
         .route(
-            "/register/:domain",
+            "/register",
             get(registration::show_form).post(registration::handle_form),
         )
+        .route("/register/:domain", get(registration::redirect_old))
 }

@@ -69,6 +69,7 @@ fn embedded_template(filename: &str) -> Option<&'static str> {
             Some(include_str!("../templates/config/postfix-master.cf.txt"))
         }
         "dovecot.conf.txt" => Some(include_str!("../templates/config/dovecot.conf.txt")),
+        "dovecot24.conf.txt" => Some(include_str!("../templates/config/dovecot24.conf.txt")),
         "opendkim.conf.txt" => Some(include_str!("../templates/config/opendkim.conf.txt")),
         "openssl.cnf.txt" => Some(include_str!("../templates/config/openssl.cnf.txt")),
         _ => None,
@@ -142,13 +143,24 @@ fn dovecot_config_version_line() -> String {
 }
 
 /// Returns the Dovecot storage version line for the dovecot.conf template.
-/// Dovecot 2.4 requires this header line.
+/// Only returns a value for Dovecot 2.4+ (2.3.x doesn't recognize this setting).
 fn dovecot_storage_version_line() -> String {
-    let version = env::var("DOVECOT_STORAGE_VERSION").unwrap_or_else(|_| {
-        info!("[config] DOVECOT_STORAGE_VERSION not set, defaulting to 2.4.0");
-        "2.4.0".to_string()
-    });
-    format!("dovecot_storage_version = {}\n", version)
+    // Only emit for Dovecot 2.4+
+    let output = std::process::Command::new("dovecot")
+        .arg("--version")
+        .output()
+        .ok();
+    if let Some(out) = output {
+        let ver = String::from_utf8_lossy(&out.stdout);
+        if ver.starts_with("2.4") || ver.starts_with("2.5") || ver.starts_with("3.") {
+            let storage_ver = env::var("DOVECOT_STORAGE_VERSION").unwrap_or_else(|_| {
+                info!("[config] DOVECOT_STORAGE_VERSION not set, defaulting to 2.4.0");
+                "2.4.0".to_string()
+            });
+            return format!("dovecot_storage_version = {}\n", storage_ver);
+        }
+    }
+    String::new()
 }
 
 /// Write content to a file with secure permissions (0600 - owner read/write only)
@@ -724,10 +736,29 @@ pub fn generate_dovecot_conf(hostname: &str) {
         "[config] generating /etc/dovecot/dovecot.conf for hostname={}",
         hostname
     );
-    let template = match load_template("dovecot.conf.txt") {
+    // Select template based on installed Dovecot version
+    let detected_version = {
+        let output = std::process::Command::new("dovecot")
+            .arg("--version")
+            .output()
+            .ok();
+        if let Some(out) = output {
+            String::from_utf8_lossy(&out.stdout).to_string()
+        } else {
+            String::new()
+        }
+    };
+    let is_v24 = detected_version.starts_with("2.4")
+        || detected_version.starts_with("2.5")
+        || detected_version.starts_with("3.");
+
+    let template_name = if is_v24 { "dovecot24.conf.txt" } else { "dovecot.conf.txt" };
+    info!("[config] using {} (detected dovecot {})", template_name, detected_version.trim());
+
+    let template = match load_template(template_name) {
         Ok(t) => t,
         Err(e) => {
-            error!("[config] failed to load dovecot.conf.txt template: {}", e);
+            error!("[config] failed to load {} template: {}", template_name, e);
             return;
         }
     };
@@ -738,15 +769,22 @@ pub fn generate_dovecot_conf(hostname: &str) {
         "# log_path = /dev/stdout"
     };
 
-    let config = template
+    let mut config = template
         .replace("{{ dovecot_config_version_line }}", &dovecot_config_version_line())
-        .replace(
-            "{{ dovecot_storage_version_line }}",
-            &dovecot_storage_version_line(),
-        )
         .replace("{{ generated_at }}", &generated_at())
         .replace("{{ hostname }}", hostname)
         .replace("{{ log_path_line }}", log_path_line);
+
+    // Only add storage_version_line for 2.4+
+    if is_v24 {
+        let storage_line = dovecot_storage_version_line();
+        if !storage_line.is_empty() {
+            config = config.replace("{{ dovecot_storage_version_line }}", &storage_line);
+        }
+    } else {
+        // Remove the placeholder for 2.3
+        config = config.replace("{{ dovecot_storage_version_line }}", "");
+    }
 
     match fs::write("/etc/dovecot/dovecot.conf", config) {
         Ok(_) => debug!("[config] wrote /etc/dovecot/dovecot.conf"),

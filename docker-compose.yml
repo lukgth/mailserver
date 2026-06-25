@@ -8,13 +8,20 @@ services:
     volumes:
       - maildb:/var/lib/postgresql/data
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U mailserver -d mailserver"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+      start_period: 10s
 
   mailserver:
     image: ghcr.io/tayyebi/mailserver:main
     build: .
     env_file: .env
     depends_on:
-      - db
+      db:
+        condition: service_healthy
     ports:
       - "${SMTP_PORT:-25}:25"
       - "${SUBMISSION_PORT:-587}:587"

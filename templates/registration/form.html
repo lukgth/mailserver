@@ -11,9 +11,9 @@
       <input type="text" name="username" id="reg_username" value="{{ username }}" required autocomplete="username"
              placeholder="yourname"
              pattern="[a-zA-Z0-9._-]+" title="Letters, digits, dots, hyphens, and underscores only"
-             style="flex:1;border-radius:0.375rem 0 0 0.375rem;border-right:none">
+             style="flex:3;border-radius:0.375rem 0 0 0.375rem;border-right:none">
       <select name="domain" id="reg_domain" required
-              style="border-radius:0 0.375rem 0.375rem 0;min-width:180px;border-left:1px solid var(--color-border,#333)">
+              style="flex:2;border-radius:0 0.375rem 0.375rem 0;border-left:1px solid var(--color-border,#333)">
         {% for d in domains %}
         <option value="{{ d.name }}"{% if d.name == selected_domain %} selected{% endif %}>@{{ d.name }}</option>
         {% endfor %}

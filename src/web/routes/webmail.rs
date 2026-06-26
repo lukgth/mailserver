@@ -1249,13 +1249,16 @@ pub async fn send_email(
                 .await;
             if let Err(msg) = limit_check {
                 send_log.push(msg.clone());
-                let response = SendResponse {
-                    success: false,
-                    message: msg,
+                flash = Some(msg);
+                let tmpl = ComposeTemplate {
+                    nav_active: "Webmail",
+                    flash: flash.as_deref(),
+                    accounts,
+                    selected_account: Some(acct.clone()),
+                    defaults: defaults.clone(),
                     send_log,
-                    attachment_warnings,
                 };
-                return Json(response).into_response();
+                return Html(tmpl.render().unwrap());
             }
 
             let domain = acct.domain_name.as_deref().unwrap_or("unknown");

@@ -1,13 +1,11 @@
 use askama::Template;
 use axum::{
     extract::{Path, Query, State},
-    http::HeaderValue,
     response::{Html, IntoResponse, Redirect, Response},
     Form,
 };
 use log::{debug, error, info, warn};
 use serde::Deserialize;
-use std::str::FromStr;
 
 use crate::db::{AbuseInbox, Account, BounceInbox};
 use crate::web::auth::AuthAdmin;
@@ -907,7 +905,7 @@ pub async fn dns_export(
             (axum::http::header::CONTENT_TYPE, "text/plain; charset=utf-8"),
             (
                 axum::http::header::CONTENT_DISPOSITION,
-                axum::http::HeaderValue::from_str(&format!("attachment; filename=dns-{}.txt", domain_name)).unwrap(),
+                "attachment; filename=dns-records.txt",
             ),
         ],
         txt,

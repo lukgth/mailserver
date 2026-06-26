@@ -290,7 +290,7 @@ pub async fn handle_form(
     let name_clone = name.clone();
 
     let result = state
-        .blocking_db(move |db| db.create_account(domain_id, &username_clone, &hash, &name_clone, 0))
+        .blocking_db(move |db| db.create_account(domain_id, &username_clone, &hash, &name_clone, 1_048_576))
         .await;
 
     match result {

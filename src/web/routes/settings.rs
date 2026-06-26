@@ -32,6 +32,7 @@ struct SettingsTemplate<'a> {
     milter_healthy: bool,
     message_size_limit: u64,
     daily_send_limit: i64,
+    default_mailbox_quota: i64,
 }
 
 #[derive(Template)]
@@ -164,6 +165,12 @@ pub async fn page(auth: AuthAdmin, State(state): State<AppState>) -> Html<String
         .and_then(|v| v.parse::<i64>().ok())
         .unwrap_or(100);
 
+    let default_mailbox_quota = state
+        .blocking_db(|db| db.get_setting("default_mailbox_quota"))
+        .await
+        .and_then(|v| v.parse::<i64>().ok())
+        .unwrap_or(1_048_576);
+
     let tmpl = SettingsTemplate {
         nav_active: "Settings",
         flash: None,
@@ -179,6 +186,7 @@ pub async fn page(auth: AuthAdmin, State(state): State<AppState>) -> Html<String
         milter_healthy,
         message_size_limit,
         daily_send_limit,
+        default_mailbox_quota,
     };
     Html(tmpl.render().unwrap())
 }
@@ -266,6 +274,20 @@ pub async fn update_mail_settings(
     info!(
         "[web] daily_send_limit set to {} by user={}",
         limit, auth.admin.username
+    );
+
+    let quota = form.default_mailbox_quota.max(0);
+    let quota_str = quota.to_string();
+
+    state
+        .blocking_db(move |db| {
+            db.set_setting("default_mailbox_quota", &quota_str);
+        })
+        .await;
+
+    info!(
+        "[web] default_mailbox_quota set to {} by user={}",
+        quota, auth.admin.username
     );
 
     crate::web::regen_configs(&state).await;

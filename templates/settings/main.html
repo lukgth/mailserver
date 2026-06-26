@@ -31,6 +31,9 @@
   <label>Daily Send Limit per User (0 = unlimited)<br>
     <input type="number" name="daily_send_limit" value="{{ daily_send_limit }}" min="0" step="1" required>
   </label>
+  <label>Default Mailbox Quota in bytes (0 = unlimited)<br>
+    <input type="number" name="default_mailbox_quota" value="{{ default_mailbox_quota }}" min="0" step="1048576" required>
+  </label>
   <button type="submit">Save Mail Settings</button>
 </form>
 

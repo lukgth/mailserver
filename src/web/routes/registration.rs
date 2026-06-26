@@ -297,9 +297,27 @@ pub async fn handle_form(
                     "domain": domain_name,
                 }),
             );
-            // Config regeneration happens on next container restart
-            // (skipped here to avoid postgres runtime conflict)
-            info!("[register] config regeneration deferred to next restart");
+            // Regenerate configs via subprocess (avoids postgres runtime conflict)
+            info!("[register] spawning genconfig subprocess");
+            let hostname = state.hostname.clone();
+            std::thread::spawn(move || {
+                let output = std::process::Command::new("/usr/local/bin/mailserver")
+                    .arg("genconfig")
+                    .env("HOSTNAME", &hostname)
+                    .output();
+                match output {
+                    Ok(o) if o.status.success() => {
+                        info!("[register] genconfig subprocess completed");
+                    }
+                    Ok(o) => {
+                        let stderr = String::from_utf8_lossy(&o.stderr);
+                        warn!("[register] genconfig subprocess failed: {}", stderr);
+                    }
+                    Err(e) => {
+                        warn!("[register] failed to spawn genconfig: {}", e);
+                    }
+                }
+            });
 
             let tmpl = SuccessTemplate {
                 nav_active: "",

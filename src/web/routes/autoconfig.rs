@@ -1,6 +1,6 @@
 use axum::{
     extract::State,
-    response::{Html, IntoResponse},
+    response::IntoResponse,
 };
 
 use crate::web::AppState;

@@ -5,7 +5,7 @@ pub mod routes;
 
 use axum::http::{HeaderValue, StatusCode, Uri};
 use axum::response::Response;
-use axum::routing::get_service;
+use axum::routing::{get, get_service};
 use axum::Router;
 use log::{debug, info, warn};
 use serde::Serialize;

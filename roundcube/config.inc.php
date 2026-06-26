@@ -24,3 +24,6 @@ $config['smtp_conn_options'] = [
         'allow_self_signed' => true,
     ],
 ];
+
+// Disable Roundcube's clickjacking check — nginx handles X-Frame-Options
+$config['x_frame_options'] = false;

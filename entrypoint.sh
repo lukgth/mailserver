@@ -21,6 +21,15 @@ else
     fi
 fi
 
+# If Let's Encrypt certs exist, copy them to /data/ssl/ for Postfix/Dovecot
+if [ -f "/etc/letsencrypt/live/${HOSTNAME}/fullchain.pem" ] && [ -f "/etc/letsencrypt/live/${HOSTNAME}/privkey.pem" ]; then
+    echo "[entrypoint] INFO: using Let's Encrypt certificates for ${HOSTNAME}"
+    cp "/etc/letsencrypt/live/${HOSTNAME}/fullchain.pem" /data/ssl/cert.pem
+    cp "/etc/letsencrypt/live/${HOSTNAME}/privkey.pem" /data/ssl/key.pem
+    chmod 600 /data/ssl/key.pem
+    chmod 644 /data/ssl/cert.pem
+fi
+
 echo "[entrypoint] INFO: seeding database"
 /usr/local/bin/mailserver seed
 

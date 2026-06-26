@@ -138,6 +138,7 @@ services:
       - rspamd-data:/var/lib/rspamd
       - rspamd-logs:/var/log/rspamd
       - ./nginx/certs:/etc/letsencrypt:ro
+      - ./rspamd/worker-controller.inc:/etc/rspamd/local.d/worker-controller.inc:ro
     environment:
       - REDIS_HOST=redis
     restart: unless-stopped

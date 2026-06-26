@@ -181,6 +181,11 @@ pub async fn action(
     Form(form): Form<ActionForm>,
 ) -> Response {
     info!("[web] POST /quarantine/{}/{} — quarantined email action", id, form.action);
+    // Validate action
+    if !["release", "delete", "deny"].contains(&form.action.as_str()) {
+        warn!("[web] invalid quarantine action: {}", form.action);
+        return Redirect::to("/quarantine").into_response();
+    }
     let success = quarantine_action(&id, &form.action);
     if success {
         Redirect::to("/quarantine").into_response()

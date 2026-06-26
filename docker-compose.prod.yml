@@ -141,6 +141,9 @@ services:
       - ./rspamd/worker-controller.inc:/etc/rspamd/local.d/worker-controller.inc:ro
     environment:
       - REDIS_HOST=redis
+    expose:
+      - "11333"  # milter port for Postfix
+      - "11334"  # controller API
     restart: unless-stopped
     networks:
       - internal

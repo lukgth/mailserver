@@ -331,7 +331,8 @@ pub async fn handle_form(
 
             // Redirect to success page (no database access needed)
             let email = format!("{}@{}", username, domain_name);
-            Redirect::to(&format!("/register/success?email={}", email)).into_response()
+            let encoded_email = email.replace('@', "%40");
+            Redirect::to(&format!("/register/success?email={}", encoded_email)).into_response()
         }
         Err(e) => {
             warn!(

@@ -1,6 +1,6 @@
 <?php
 // Base URL behind nginx reverse proxy
-$config['request_path'] = '/mail/';
+$config['request_path'] = '/webmail/';
 
 // IMAP — STARTTLS on port 143 (internal Docker network)
 $config['imap_host'] = 'tls://mailserver:143';

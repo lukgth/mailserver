@@ -149,7 +149,7 @@ services:
     environment:
       ROUNDCUBEMAIL_DB_TYPE: sqlite
       ROUNDCUBEMAIL_SKIN: elastic
-      ROUNDCUBEMAIL_REQUEST_PATH: /mail/
+      ROUNDCUBEMAIL_REQUEST_PATH: /webmail/
     volumes:
       - roundcube-db:/var/roundcube/db
       - ./roundcube/config.inc.php:/var/roundcube/config/config.inc.php:ro

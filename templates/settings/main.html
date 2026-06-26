@@ -23,11 +23,13 @@
   <button type="submit">Save Feature Settings</button>
 </form>
 
-<h2>Mail Size Limit</h2>
-<p>Maximum size of an individual email message accepted by Postfix (in bytes). Default is 31457280 (30 MiB).</p>
+<h2>Mail Settings</h2>
 <form method="post" action="/settings/mail">
   <label>Message Size Limit (bytes)<br>
     <input type="number" name="message_size_limit" value="{{ message_size_limit }}" min="1048576" step="1048576" required>
+  </label>
+  <label>Daily Send Limit per User (0 = unlimited)<br>
+    <input type="number" name="daily_send_limit" value="{{ daily_send_limit }}" min="0" step="1" required>
   </label>
   <button type="submit">Save Mail Settings</button>
 </form>

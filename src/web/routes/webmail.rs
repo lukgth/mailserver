@@ -1242,6 +1242,22 @@ pub async fn send_email(
 
     match acct {
         Some(ref acct) => {
+            // Daily send limit check
+            let aid = acct.id;
+            let limit_check = state
+                .blocking_db(move |db| db.check_and_increment_send_limit(aid))
+                .await;
+            if let Err(msg) = limit_check {
+                send_log.push(msg.clone());
+                let response = SendResponse {
+                    success: false,
+                    message: msg,
+                    send_log,
+                    attachment_warnings,
+                };
+                return Json(response).into_response();
+            }
+
             let domain = acct.domain_name.as_deref().unwrap_or("unknown");
             let email_addr = format!("{}@{}", acct.username, domain);
             let sender_name = sanitize_header_value(form.sender_name.trim());

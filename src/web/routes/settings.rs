@@ -31,6 +31,7 @@ struct SettingsTemplate<'a> {
     filter_healthy: bool,
     milter_healthy: bool,
     message_size_limit: u64,
+    daily_send_limit: i64,
 }
 
 #[derive(Template)]
@@ -157,6 +158,12 @@ pub async fn page(auth: AuthAdmin, State(state): State<AppState>) -> Html<String
         .and_then(|v| v.parse::<u64>().ok())
         .unwrap_or(31_457_280);
 
+    let daily_send_limit = state
+        .blocking_db(|db| db.get_setting("daily_send_limit"))
+        .await
+        .and_then(|v| v.parse::<i64>().ok())
+        .unwrap_or(100);
+
     let tmpl = SettingsTemplate {
         nav_active: "Settings",
         flash: None,
@@ -171,6 +178,7 @@ pub async fn page(auth: AuthAdmin, State(state): State<AppState>) -> Html<String
         filter_healthy,
         milter_healthy,
         message_size_limit,
+        daily_send_limit,
     };
     Html(tmpl.render().unwrap())
 }
@@ -244,6 +252,20 @@ pub async fn update_mail_settings(
     info!(
         "[web] message_size_limit set to {} by user={}",
         size, auth.admin.username
+    );
+
+    let limit = form.daily_send_limit.max(0);
+    let limit_str = limit.to_string();
+
+    state
+        .blocking_db(move |db| {
+            db.set_setting("daily_send_limit", &limit_str);
+        })
+        .await;
+
+    info!(
+        "[web] daily_send_limit set to {} by user={}",
+        limit, auth.admin.username
     );
 
     crate::web::regen_configs(&state).await;

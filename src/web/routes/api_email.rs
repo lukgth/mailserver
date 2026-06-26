@@ -301,6 +301,15 @@ pub async fn send_email(
         None => return json_error(StatusCode::NOT_FOUND, "Account not found").into_response(),
     };
 
+    // Daily send limit check
+    let aid = acct.id;
+    if let Err(msg) = state
+        .blocking_db(move |db| db.check_and_increment_send_limit(aid))
+        .await
+    {
+        return json_error(StatusCode::TOO_MANY_REQUESTS, &msg).into_response();
+    }
+
     let domain = acct.domain_name.as_deref().unwrap_or("unknown");
     let email_addr = format!("{}@{}", acct.username, domain);
 

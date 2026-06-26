@@ -2246,6 +2246,52 @@ impl Database {
             .unwrap_or(false)
     }
 
+    /// Check and increment daily send count for an account.
+    /// Returns Ok(()) if allowed, Err(msg) if limit reached.
+    pub fn check_and_increment_send_limit(&self, account_id: i64) -> Result<(), String> {
+        let limit: i64 = self
+            .get_setting("daily_send_limit")
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(100);
+
+        if limit <= 0 {
+            return Ok(()); // 0 = unlimited
+        }
+
+        let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
+        let mut conn = self.conn();
+
+        // Reset count if it's a new day
+        conn.execute(
+            "UPDATE accounts SET daily_send_count = 0, daily_send_date = $1
+             WHERE id = $2 AND daily_send_date != $1",
+            &[&today, &account_id],
+        ).ok();
+
+        // Check current count
+        let count: i64 = conn
+            .query_opt(
+                "SELECT daily_send_count FROM accounts WHERE id = $1",
+                &[&account_id],
+            )
+            .ok()
+            .flatten()
+            .map(|r| r.get(0))
+            .unwrap_or(0);
+
+        if count >= limit {
+            return Err(format!("Daily send limit of {} reached. Try again tomorrow.", limit));
+        }
+
+        // Increment
+        conn.execute(
+            "UPDATE accounts SET daily_send_count = daily_send_count + 1 WHERE id = $1",
+            &[&account_id],
+        ).ok();
+
+        Ok(())
+    }
+
     pub fn get_stats(&self) -> Stats {
         debug!("[db] fetching aggregate stats");
         let mut conn = self.conn();

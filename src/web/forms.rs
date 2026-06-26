@@ -166,6 +166,7 @@ pub struct FeatureToggleForm {
 #[derive(Deserialize)]
 pub struct MailSettingsForm {
     pub message_size_limit: u64,
+    pub daily_send_limit: i64,
 }
 
 #[derive(Deserialize)]

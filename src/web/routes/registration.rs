@@ -374,15 +374,6 @@ pub struct SuccessQuery {
     pub email: String,
 }
 
-#[derive(Template)]
-#[template(path = "registration/success.html")]
-struct SuccessTemplate<'a> {
-    nav_active: &'a str,
-    flash: Option<&'a str>,
-    email: String,
-    hostname: &'a str,
-}
-
 /// Show the registration success page with connection info.
 /// No database access — safe to render in tokio context.
 pub async fn show_success(

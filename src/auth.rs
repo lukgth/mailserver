@@ -4,7 +4,6 @@ use hmac::{Hmac, Mac};
 use log::{debug, error, info, warn};
 use rand::Rng;
 use sha1::Sha1;
-use std::env;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 type HmacSha1 = Hmac<Sha1>;

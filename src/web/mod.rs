@@ -229,7 +229,7 @@ pub async fn start_server(state: AppState) {
         .layer(
             // CORS: allow same-origin requests only
             CorsLayer::new()
-                .allow_origin(tower_http::cors::AllowOrigin::mirror())
+                .allow_origin(tower_http::cors::AllowOrigin::mirror_request())
                 .allow_methods([axum::http::Method::GET, axum::http::Method::POST])
                 .allow_headers([axum::http::header::CONTENT_TYPE, axum::http::header::AUTHORIZATION]),
         )

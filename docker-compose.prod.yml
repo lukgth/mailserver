@@ -141,7 +141,7 @@ services:
       - ./nginx/certs:/etc/letsencrypt:ro
       - ./rspamd/worker-controller.inc:/etc/rspamd/local.d/worker-controller.inc:ro
       - ./rspamd/worker-proxy.inc:/etc/rspamd/local.d/worker-proxy.inc:ro
-      - ./rspamd/quarantine.inc:/etc/rspamd/local.d/quarantine.inc:ro
+      - ./rspamd/quarantine.conf:/etc/rspamd/local.d/quarantine.conf:ro
     environment:
       - REDIS_HOST=redis
     expose:

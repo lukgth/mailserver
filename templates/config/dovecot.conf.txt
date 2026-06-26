@@ -12,6 +12,9 @@ ssl = yes
 ssl_cert = </data/ssl/cert.pem
 ssl_key = </data/ssl/key.pem
 
+# Allow plaintext auth from Docker internal network (Roundcube connects here)
+disable_plaintext_auth = no
+
 # TLS configuration for broader client compatibility (ESP8266, ESP32, embedded clients)
 # Support TLS 1.2+ for embedded and modern clients (TLS 1.0/1.1 are deprecated)
 ssl_min_protocol = TLSv1.2

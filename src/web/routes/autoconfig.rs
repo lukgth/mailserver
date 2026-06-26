@@ -24,8 +24,8 @@ pub async fn autoconfig(State(state): State<AppState>) -> impl IntoResponse {
     </incomingServer>
     <outgoingServer type="smtp">
       <hostname>{hostname}</hostname>
-      <port>587</port>
-      <socketType>STARTTLS</socketType>
+      <port>465</port>
+      <socketType>SSL</socketType>
       <authentication>password-cleartext</authentication>
       <username>{{EMAILADDRESS}}</username>
     </outgoingServer>

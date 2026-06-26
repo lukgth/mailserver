@@ -260,8 +260,8 @@ pub async fn handle_form(
         return re_render("Display name must be 128 characters or fewer.").await;
     }
 
-    // Validate invite code length
-    if invite_code.len() > 64 {
+    // Validate invite code format (32 hex chars)
+    if invite_code.len() != 32 || !invite_code.chars().all(|c| c.is_ascii_hexdigit()) {
         return re_render("Invalid invite code.").await;
     }
 

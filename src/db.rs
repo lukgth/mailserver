@@ -11,7 +11,8 @@ fn now() -> String {
 fn generate_invite_code() -> String {
     use rand::Rng;
     let mut rng = rand::thread_rng();
-    (0..16)
+    // 32 hex chars = 128 bits of entropy
+    (0..32)
         .map(|_| format!("{:x}", rng.gen_range(0..16)))
         .collect()
 }

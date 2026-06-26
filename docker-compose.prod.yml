@@ -123,7 +123,7 @@ services:
 
   # SpamAssassin spamd — spam filtering daemon
   spamd:
-    image: tiredofit/spamassassin:latest
+    image: dinkel/spamassassin:latest
     expose:
       - "783"
     restart: unless-stopped

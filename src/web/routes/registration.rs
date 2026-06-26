@@ -319,13 +319,8 @@ pub async fn handle_form(
                 }
             });
 
-            let tmpl = SuccessTemplate {
-                nav_active: "",
-                flash: None,
-                email: format!("{}@{}", username, domain_name),
-                hostname: &state.hostname,
-            };
-            Html(tmpl.render().unwrap()).into_response()
+            // Redirect to home (avoids template rendering in tokio context)
+            Redirect::to("/").into_response()
         }
         Err(e) => {
             warn!(

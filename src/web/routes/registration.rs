@@ -319,8 +319,9 @@ pub async fn handle_form(
                 }
             });
 
-            // Redirect to home (avoids template rendering in tokio context)
-            Redirect::to("/").into_response()
+            // Redirect to success page (no database access needed)
+            let email = format!("{}@{}", username, domain_name);
+            Redirect::to(&format!("/register/success?email={}", email)).into_response()
         }
         Err(e) => {
             warn!(
@@ -356,4 +357,33 @@ pub async fn handle_form(
             Html(tmpl.render().unwrap()).into_response()
         }
     }
+}
+
+#[derive(Deserialize)]
+pub struct SuccessQuery {
+    pub email: String,
+}
+
+#[derive(Template)]
+#[template(path = "registration/success.html")]
+struct SuccessTemplate<'a> {
+    nav_active: &'a str,
+    flash: Option<&'a str>,
+    email: String,
+    hostname: &'a str,
+}
+
+/// Show the registration success page with connection info.
+/// No database access — safe to render in tokio context.
+pub async fn show_success(
+    State(state): State<AppState>,
+    query: axum::extract::Query<SuccessQuery>,
+) -> impl IntoResponse {
+    let tmpl = SuccessTemplate {
+        nav_active: "",
+        flash: None,
+        email: query.email.clone(),
+        hostname: &state.hostname,
+    };
+    Html(tmpl.render().unwrap())
 }

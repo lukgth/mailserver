@@ -231,5 +231,6 @@ pub fn registration_routes() -> Router<AppState> {
             "/register",
             get(registration::show_form).post(registration::handle_form),
         )
+        .route("/register/success", get(registration::show_success))
         .route("/register/:domain", get(registration::redirect_old))
 }

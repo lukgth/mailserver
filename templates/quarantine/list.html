@@ -15,7 +15,7 @@
   <td><a href="/quarantine/{{ e.id }}">{{ e.subject }}</a></td>
   <td><small>{{ e.sender }}</small></td>
   <td><small>{{ e.recipient }}</small></td>
-  <td><strong>{{ "%.1f"|format(e.score) }}</strong></td>
+  <td><strong>{{ e.score }}</strong></td>
   <td><small>{{ e.size }}</small></td>
   <td>
     <form method="post" action="/quarantine/{{ e.id }}/action" style="display:inline">

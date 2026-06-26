@@ -5,7 +5,7 @@ use axum::{
     Form,
 };
 use log::{debug, info, warn};
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 
 use crate::web::auth::AuthAdmin;
 use crate::web::AppState;
@@ -25,7 +25,7 @@ struct QuarantineEmail {
     subject: String,
     sender: String,
     recipient: String,
-    score: f64,
+    score: String,
     date: String,
     size: String,
 }
@@ -39,7 +39,7 @@ struct QuarantineDetailTemplate<'a> {
     subject: String,
     sender: String,
     recipient: String,
-    score: f64,
+    score: String,
     date: String,
     headers: String,
     body: String,
@@ -70,7 +70,7 @@ fn fetch_quarantine_list() -> Vec<QuarantineEmail> {
                         subject: item.get("subject").and_then(|v| v.as_str()).unwrap_or("(no subject)").to_string(),
                         sender: item.get("from").and_then(|v| v.as_str()).unwrap_or("unknown").to_string(),
                         recipient: item.get("to").and_then(|v| v.as_str()).unwrap_or("unknown").to_string(),
-                        score: item.get("score").and_then(|v| v.as_f64()).unwrap_or(0.0),
+                        score: format!("{:.1}", item.get("score").and_then(|v| v.as_f64()).unwrap_or(0.0)),
                         date: item.get("date").and_then(|v| v.as_str()).unwrap_or("").to_string(),
                         size: item.get("size").and_then(|v| v.as_i64()).map(|s| format!("{} KB", s / 1024)).unwrap_or("0 KB".to_string()),
                     })
@@ -166,7 +166,7 @@ pub async fn detail(
         subject: meta.map(|e| e.subject.clone()).unwrap_or_default(),
         sender: meta.map(|e| e.sender.clone()).unwrap_or_default(),
         recipient: meta.map(|e| e.recipient.clone()).unwrap_or_default(),
-        score: meta.map(|e| e.score).unwrap_or(0.0),
+        score: meta.map(|e| e.score.clone()).unwrap_or_else(|| "0.0".to_string()),
         date: meta.map(|e| e.date.clone()).unwrap_or_default(),
         headers,
         body,

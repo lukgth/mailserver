@@ -897,7 +897,7 @@ pub async fn dns_export(
 
     let txt = format!(
         "; DNS Records for {domain_name}\n; Cloudflare-compatible BIND zone file\n; Import at: https://dash.cloudflare.com/?to=/:zone/dns\n; TTL 3600 = 1 hour\n{sep}\n{domain_name}.\t3600\tMX\t10 {hostname}.\n{domain_name}.\t3600\tA\t{hostname}\n{domain_name}.\t3600\tTXT\t\"v=spf1 a mx include:{hostname} ~all\"\n{dkim_selector}._domainkey.{domain_name}.\t3600\tTXT\t\"v=DKIM1; k=rsa; p={dkim_key}\"\n_dmarc.{domain_name}.\t3600\tTXT\t\"v=DMARC1; p=reject; adkim=s; aspf=s; fo=1; rua=mailto:postmaster@{domain_name}; ruf=mailto:postmaster@{domain_name}\"\nautoconfig.{domain_name}.\t3600\tCNAME\t{hostname}.\n_imaps._tcp.{domain_name}.\t3600\tSRV\t0 1 993 {hostname}.\n_submission._tcp.{domain_name}.\t3600\tSRV\t0 1 587 {hostname}.\n",
-        sep = "; " + "=".repeat(48),
+        sep = "; ".to_owned() + &"=".repeat(48),
     );
 
     (
@@ -905,7 +905,7 @@ pub async fn dns_export(
             (axum::http::header::CONTENT_TYPE, "text/plain; charset=utf-8"),
             (
                 axum::http::header::CONTENT_DISPOSITION,
-                format!("attachment; filename="dns-{}.txt"", domain_name),
+                format!("attachment; filename=dns-{}.txt", domain_name),
             ),
         ],
         txt,

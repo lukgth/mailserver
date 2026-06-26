@@ -1,6 +1,6 @@
 use askama::Template;
 use axum::{extract::State, response::Html};
-use log::{debug, error};
+use log::debug;
 
 use crate::web::auth::AuthAdmin;
 use crate::web::AppState;

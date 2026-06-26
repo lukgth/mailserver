@@ -297,12 +297,9 @@ pub async fn handle_form(
                     "domain": domain_name,
                 }),
             );
-            // Regenerate configs in background on a raw thread (no tokio involvement)
-            let db = state.db.clone();
-            let hostname = state.hostname.clone();
-            std::thread::spawn(move || {
-                crate::config::generate_all_configs(&db, &hostname);
-            });
+            // Config regeneration happens on next container restart
+            // (skipped here to avoid postgres runtime conflict)
+            info!("[register] config regeneration deferred to next restart");
 
             let tmpl = SuccessTemplate {
                 nav_active: "",

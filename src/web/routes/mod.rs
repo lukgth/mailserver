@@ -101,8 +101,6 @@ pub fn auth_routes() -> Router<AppState> {
         .route("/queue/:id/delete", post(queue::delete_message))
         .route("/queue/:id/flush", post(queue::flush_message))
         .route("/quarantine", get(quarantine::list))
-        .route("/quarantine/:id", get(quarantine::detail))
-        .route("/quarantine/:id/action", post(quarantine::action))
         .route("/webmail", get(webmail::inbox))
         .route("/webmail/view/:filename", get(webmail::view_email))
         .route("/webmail/download/:filename", get(webmail::download_email))

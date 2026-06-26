@@ -1,34 +1,37 @@
 {% extends "layout.html" %}
-{% block title %}Quarantine{% endblock %}
+{% block title %}Spam Filter{% endblock %}
 {% block content %}
-<h1>Quarantine</h1>
-<p>Emails flagged by Rspamd as suspicious. Review and take action.</p>
+<h1>Spam Filter Status</h1>
 
-{% if emails.is_empty() %}
-<p><em>No quarantined emails.</em></p>
-{% else %}
+<p>SpamAssassin is active and scanning all inbound/outbound emails via milter.</p>
+
+<h2>How it works</h2>
+<ul>
+<li>Every email passes through SpamAssassin before delivery</li>
+<li>SpamAssassin scores emails based on rules, Bayesian filtering, and network tests</li>
+<li>Emails with high spam scores are flagged in headers (X-Spam-Score)</li>
+<li>Check email headers in your mail client to see spam scores</li>
+</ul>
+
+<h2>Spam Score Headers</h2>
+<p>Look for these headers in received emails:</p>
 <table>
-<tr><th>Date</th><th>Subject</th><th>From</th><th>To</th><th>Score</th><th>Size</th><th></th></tr>
-{% for e in emails %}
-<tr>
-  <td><small>{{ e.date }}</small></td>
-  <td><a href="/quarantine/{{ e.id }}">{{ e.subject }}</a></td>
-  <td><small>{{ e.sender }}</small></td>
-  <td><small>{{ e.recipient }}</small></td>
-  <td><strong>{{ e.score }}</strong></td>
-  <td><small>{{ e.size }}</small></td>
-  <td>
-    <form method="post" action="/quarantine/{{ e.id }}/action" style="display:inline">
-      <input type="hidden" name="action" value="release">
-      <button type="submit" style="color:#090">Allow</button>
-    </form>
-    <form method="post" action="/quarantine/{{ e.id }}/action" style="display:inline">
-      <input type="hidden" name="action" value="delete">
-      <button type="submit" style="color:#c00">Delete</button>
-    </form>
-  </td>
-</tr>
-{% endfor %}
+<tr><th>Header</th><th>Description</th></tr>
+<tr><td><code>X-Spam-Score</code></td><td>Spam score (higher = more spammy)</td></tr>
+<tr><td><code>X-Spam-Status</code></td><td>Yes/No with score breakdown</td></tr>
+<tr><td><code>X-Spam-Flag</code></td><td>YES if flagged as spam</td></tr>
 </table>
-{% endif %}
+
+<h2>Typical Score Thresholds</h2>
+<table>
+<tr><th>Score</th><th>Action</th></tr>
+<tr><td>&lt; 3</td><td>Clean — delivered normally</td></tr>
+<tr><td>3 - 5</td><td>Suspicious — flagged in headers</td></tr>
+<tr><td>5 - 10</td><td>Likely spam — flagged prominently</td></tr>
+<tr><td>&gt; 10</td><td>Almost certainly spam</td></tr>
+</table>
+
+<h2>Logs</h2>
+<pre>docker compose logs spamd --tail=20
+docker compose logs spamass-milter --tail=20</pre>
 {% endblock %}

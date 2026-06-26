@@ -157,7 +157,21 @@ pub async fn create(
         "[web] POST /accounts — creating account username={}, domain_id={}",
         form.username, form.domain_id
     );
-    let db_hash = match crate::auth::validate_password_length(&form.password).and_then(|_| crate::auth::hash_password(&form.password)) {
+    if let Err(e) = crate::auth::validate_password_length(&form.password) {
+        error!("[web] password validation failed for {}: {}", form.username, e);
+        let tmpl = ErrorTemplate {
+            nav_active: "Accounts",
+            flash: None,
+            status_code: 400,
+            status_text: "Bad Request",
+            title: "Error",
+            message: &e,
+            back_url: "/accounts/new",
+            back_label: "Back",
+        };
+        return (StatusCode::BAD_REQUEST, Html(tmpl.render().unwrap())).into_response();
+    }
+    let db_hash = match crate::auth::hash_password(&form.password) {
         Ok(h) => h,
         Err(e) => {
             error!(

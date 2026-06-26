@@ -37,6 +37,7 @@ pub mod webmail;
 
 use super::AppState;
 use axum::{
+    response::{IntoResponse, Response},
     routing::{get, post},
     Router,
 };
@@ -235,7 +236,6 @@ pub fn auth_routes() -> Router<AppState> {
 /// Logout handler — returns 401 with WWW-Authenticate to clear browser credentials.
 async fn logout_handler() -> Response {
     use axum::http::{header, StatusCode};
-    use axum::response::Html;
 
     let body = crate::web::errors::render_error_page(
         StatusCode::UNAUTHORIZED,
@@ -244,12 +244,12 @@ async fn logout_handler() -> Response {
         "/",
         "Dashboard",
     );
-    Response::builder()
-        .status(StatusCode::UNAUTHORIZED)
-        .header(header::WWW_AUTHENTICATE, "Basic realm="Mailserver Admin", charset=\"UTF-8\"")
-        .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
-        .body(axum::body::Body::from(body.0))
-        .expect("Failed to build logout response")
+    (
+        StatusCode::UNAUTHORIZED,
+        [(header::WWW_AUTHENTICATE, "Basic realm=\"Mailserver Admin\", charset=\"UTF-8\"")],
+        body,
+    )
+        .into_response()
 }
 
 pub fn registration_routes() -> Router<AppState> {

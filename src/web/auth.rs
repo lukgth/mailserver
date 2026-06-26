@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::net::IpAddr;
-use std::sync::Mutex;
+use std::sync::{LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
 use axum::{
@@ -31,7 +31,7 @@ struct FailureRecord {
 }
 
 // ponytail: global lock is fine — single admin, low traffic
-static LOGIN_FAILURES: Mutex<HashMap<IpAddr, FailureRecord>> = Mutex::new(HashMap::new());
+static LOGIN_FAILURES: LazyLock<Mutex<HashMap<IpAddr, FailureRecord>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
 
 fn is_locked_out(ip: &IpAddr) -> bool {
     let mut map = LOGIN_FAILURES.lock().unwrap();

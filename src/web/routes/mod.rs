@@ -57,6 +57,7 @@ pub fn auth_routes() -> Router<AppState> {
         .route("/domains/:id/bounce", post(domains::set_bounce_inbox))
         .route("/domains/:id/bounce/delete", post(domains::remove_bounce_inbox))
         .route("/domains/:id/dns", get(domains::dns_info))
+        .route("/domains/:id/dns/export", get(domains::dns_export))
         .route("/domains/:id/check", get(domains::dns_check_run))
         .route("/domains/:id", post(domains::update))
         .route("/accounts/new", get(accounts::new_form))

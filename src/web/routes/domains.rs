@@ -864,3 +864,77 @@ pub async fn dns_check_run(
     };
     Html(tmpl.render().unwrap()).into_response()
 }
+
+/// Export DNS records as plain text for a domain (excluding Outlook autodiscover).
+pub async fn dns_export(
+    _auth: AuthAdmin,
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+) -> Response {
+    debug!("[web] GET /domains/{}/dns/export — DNS export requested", id);
+    let domain = match state.blocking_db(move |db| db.get_domain(id)).await {
+        Some(d) => d,
+        None => {
+            return Redirect::to("/domains").into_response();
+        }
+    };
+
+    let dkim_key = domain
+        .dkim_public_key
+        .as_ref()
+        .map(|pub_key| {
+            pub_key
+                .lines()
+                .filter(|l| !l.starts_with("-----"))
+                .collect::<Vec<_>>()
+                .join("")
+        })
+        .unwrap_or_default();
+
+    let hostname = &state.hostname;
+    let domain_name = &domain.domain;
+    let dkim_selector = &domain.dkim_selector;
+
+    let txt = format!(
+        """DNS Records for {domain_name}
+{sep}
+
+MX Record:
+{domain_name}.        MX      10 {hostname}.
+
+A Record:
+{domain_name}.        A       {hostname}
+
+SPF (TXT):
+{domain_name}.        TXT     "v=spf1 a mx include:{hostname} ~all"
+
+DKIM (TXT):
+{dkim_selector}._domainkey.{domain_name}.  TXT     "v=DKIM1; k=rsa; p={dkim_key}"
+
+DMARC (TXT):
+_dmarc.{domain_name}.  TXT     "v=DMARC1; p=reject; adkim=s; aspf=s; fo=1; rua=mailto:postmaster@{domain_name}; ruf=mailto:postmaster@{domain_name}"
+
+Thunderbird Autoconfig (CNAME):
+autoconfig.{domain_name}.    CNAME   {hostname}.
+
+IMAP Service Discovery (SRV):
+_imaps._tcp.{domain_name}.        SRV     0 1 993 {hostname}.
+
+SMTP Submission Discovery (SRV):
+_submission._tcp.{domain_name}.   SRV     0 1 587 {hostname}.
+""",
+        sep = "=".repeat(50),
+    );
+
+    (
+        [
+            (axum::http::header::CONTENT_TYPE, "text/plain; charset=utf-8"),
+            (
+                axum::http::header::CONTENT_DISPOSITION,
+                format!("attachment; filename="dns-{}.txt"", domain_name),
+            ),
+        ],
+        txt,
+    )
+        .into_response()
+}

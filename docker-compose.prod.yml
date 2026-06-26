@@ -121,16 +121,12 @@ services:
     networks:
       - internal
 
-  # SpamAssassin — spam filtering via milter (simpler than Rspamd)
+  # SpamAssassin — spam filtering via milter (spamd + spamass-milter)
   spamassassin:
-    image: boky/spamassassin:latest
-    volumes:
-      - sa-data:/var/lib/spamassassin
-      - sa-logs:/var/log/spamassassin
-    environment:
-      - SA_OPTS=--allow-tell
+    build: ./spamassassin
     expose:
-      - "783"  # spamd protocol (milter connects here)
+      - "783"   # spamd
+      - "9999"  # milter (Postfix connects here)
     restart: unless-stopped
     networks:
       - internal
@@ -150,5 +146,3 @@ volumes:
     external: true
   # Ephemeral — safe to remove on down
   certbot-www:
-  sa-data:
-  sa-logs:

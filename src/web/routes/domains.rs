@@ -894,9 +894,10 @@ pub async fn dns_export(
     let hostname = &state.hostname;
     let domain_name = &domain.domain;
     let dkim_selector = &domain.dkim_selector;
+    let sep = "; ".to_owned() + &"=".repeat(48);
 
     let txt = format!(
-        sep = "; ".to_owned() + &"=".repeat(48),
+        "; DNS Records for {domain_name}\n; Cloudflare-compatible BIND zone file\n; Import at: https://dash.cloudflare.com/?to=/:zone/dns\n; TTL 3600 = 1 hour\n{sep}\n{domain_name}.\t3600\tMX\t10 {hostname}.\n{domain_name}.\t3600\tTXT\t\"v=spf1 a mx include:{hostname} ~all\"\n{dkim_selector}._domainkey.{domain_name}.\t3600\tTXT\t\"v=DKIM1; k=rsa; p={dkim_key}\"\n_dmarc.{domain_name}.\t3600\tTXT\t\"v=DMARC1; p=reject; adkim=s; aspf=s; fo=1; rua=mailto:postmaster@{domain_name}; ruf=mailto:postmaster@{domain_name}\"\nautoconfig.{domain_name}.\t3600\tCNAME\t{hostname}.\n_imaps._tcp.{domain_name}.\t3600\tSRV\t0 1 993 {hostname}.\n_submission._tcp.{domain_name}.\t3600\tSRV\t0 1 587 {hostname}.\n", sep = sep,
     );
 
     (

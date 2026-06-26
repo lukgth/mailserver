@@ -4,9 +4,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     spamassassin spamass-milter \
     && rm -rf /var/lib/apt/lists/*
 
-# Create spamd user
-RUN adduser --disabled-password --no-create-home --gecos "" spamd || true
-
 COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 

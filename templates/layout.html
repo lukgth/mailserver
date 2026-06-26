@@ -8,6 +8,7 @@
 body { font-family: monospace; max-width: 960px; margin: 1em auto; padding: 0 1em; line-height: 1.5; color: #000; background: #fff; }
 h1 { font-size: 1.1em; border-bottom: 1px solid #ccc; padding-bottom: 0.3em; }
 h2 { font-size: 1em; margin-top: 1.5em; }
+h3 { font-size: 1em; margin-top: 1em; }
 a { color: #00c; }
 a:visited { color: #606; }
 a:hover { background: #eee; }
@@ -17,16 +18,31 @@ th { border-bottom: 2px solid #999; cursor: pointer; }
 th:hover { background: #eee; }
 tr:hover { background: #f5f5f5; }
 input, select, button, textarea { font-family: monospace; font-size: 0.9em; padding: 0.2em 0.4em; border: 1px solid #999; background: #fff; }
-button { cursor: pointer; }
+input[type="text"], input[type="password"], input[type="email"], textarea { width: 100%; box-sizing: border-box; }
+select { max-width: 300px; }
+button { cursor: pointer; padding: 0.3em 1em; }
 button:hover { background: #eee; }
-pre { background: #f5f5f5; padding: 0.5em; overflow-x: auto; }
+fieldset { border: 1px solid #ccc; padding: 0.5em; margin: 0.5em 0; }
+legend { font-weight: bold; padding: 0 0.3em; }
+label { display: block; margin: 0.4em 0 0.1em; }
+pre, code { background: #f5f5f5; padding: 0.2em 0.3em; font-size: 0.9em; }
+pre { padding: 0.5em; overflow-x: auto; }
+details { margin: 0.5em 0; }
+summary { cursor: pointer; }
+dt { font-weight: bold; margin-top: 0.3em; }
+dd { margin-left: 1em; }
+nav a { margin-right: 0.5em; }
+.nav a { margin-right: 0.5em; }
+.nav a[aria-current] { font-weight: bold; }
+hgroup { margin: 1em 0; }
+hgroup small { color: #666; display: block; }
+article { margin: 0.3em 0; }
+data { font-size: 1.5em; font-weight: bold; margin-right: 0.3em; }
 hr { border: none; border-top: 1px solid #ccc; margin: 1em 0; }
 small { color: #666; }
 .error { color: #c00; }
 .success { color: #090; }
-.nav { margin: 0.5em 0; }
-.nav a { margin-right: 0.5em; }
-.nav a[aria-current] { font-weight: bold; }
+.muted { color: #888; }
 footer { margin-top: 2em; border-top: 1px solid #ccc; padding-top: 0.5em; font-size: 0.8em; color: #666; }
 </style>
 </head>

@@ -121,12 +121,22 @@ services:
     networks:
       - internal
 
-  # SpamAssassin — spam filtering via milter (spamd + spamass-milter)
-  spamassassin:
-    build: ./spamassassin
+  # SpamAssassin spamd — spam filtering daemon
+  spamd:
+    image: tiredofit/spamassassin:latest
     expose:
-      - "783"   # spamd
-      - "9999"  # milter (Postfix connects here)
+      - "783"
+    restart: unless-stopped
+    networks:
+      - internal
+
+  # spamass-milter — connects Postfix to spamd
+  spamass-milter:
+    build: ./spamassassin
+    depends_on:
+      - spamd
+    expose:
+      - "9999"
     restart: unless-stopped
     networks:
       - internal

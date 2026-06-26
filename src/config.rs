@@ -282,8 +282,8 @@ pub fn generate_postfix_main_cf(db: &Database, hostname: &str) {
         .to_string();
 
     let milter_config = if milter_enabled {
-        r#"smtpd_milters = inet:spamassassin:9999
-non_smtpd_milters = inet:spamassassin:9999
+        r#"smtpd_milters = inet:spamass-milter:9999
+non_smtpd_milters = inet:spamass-milter:9999
 milter_default_action = accept"#
             .to_string()
     } else {

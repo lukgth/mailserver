@@ -155,6 +155,7 @@ services:
       ROUNDCUBEMAIL_SMTP_PORT: "587"
     volumes:
       - roundcube-db:/var/roundcube/db
+      - ./roundcube/config.inc.php:/var/roundcube/config/config.inc.php:ro
     restart: unless-stopped
     networks:
       - internal

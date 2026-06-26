@@ -255,6 +255,16 @@ pub async fn handle_form(
         return re_render(&reason).await;
     }
 
+    // Validate display name length
+    if name.len() > 128 {
+        return re_render("Display name must be 128 characters or fewer.").await;
+    }
+
+    // Validate invite code length
+    if invite_code.len() > 64 {
+        return re_render("Invalid invite code.").await;
+    }
+
     // Validate password
     if password != confirm_password {
         return re_render("Passwords do not match.").await;

@@ -3,7 +3,7 @@ mod errors;
 mod forms;
 pub mod routes;
 
-use axum::http::{StatusCode, Uri};
+use axum::http::{HeaderValue, StatusCode, Uri};
 use axum::response::Response;
 use axum::routing::get_service;
 use axum::Router;
@@ -13,6 +13,8 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+use tower_http::cors::CorsLayer;
+use tower_http::set_header::SetResponseHeaderLayer;
 use tower_http::services::ServeDir;
 
 use crate::web::errors::status_response;
@@ -224,6 +226,25 @@ pub async fn start_server(state: AppState) {
             }),
         )
         .fallback(handle_not_found)
+        .layer(
+            // CORS: allow same-origin requests only
+            CorsLayer::new()
+                .allow_origin(tower_http::cors::AllowOrigin::mirror())
+                .allow_methods([axum::http::Method::GET, axum::http::Method::POST])
+                .allow_headers([axum::http::header::CONTENT_TYPE, axum::http::header::AUTHORIZATION]),
+        )
+        .layer(SetResponseHeaderLayer::overriding(
+            axum::http::header::STRICT_TRANSPORT_SECURITY,
+            HeaderValue::from_static("max-age=63072000; includeSubDomains"),
+        ))
+        .layer(SetResponseHeaderLayer::overriding(
+            axum::http::header::X_CONTENT_TYPE_OPTIONS,
+            HeaderValue::from_static("nosniff"),
+        ))
+        .layer(SetResponseHeaderLayer::overriding(
+            axum::http::header::X_FRAME_OPTIONS,
+            HeaderValue::from_static("DENY"),
+        ))
         .with_state(state);
 
     let addr = format!("0.0.0.0:{}", port);
@@ -300,6 +321,21 @@ pub(crate) fn fire_webhook(state: &AppState, event: &str, details: serde_json::V
     let webhook_url = db.get_setting("webhook_url").unwrap_or_default();
     if webhook_url.is_empty() {
         return;
+    }
+
+    // Security: validate webhook URL
+    if !webhook_url.starts_with("https://") {
+        warn!("[webhook] rejecting non-HTTPS webhook URL: {}", webhook_url);
+        return;
+    }
+    // Block internal IPs and localhost
+    let blocked = ["127.0.0.1", "localhost", "::1", "0.0.0.0", "10.", "172.16.", "172.17.", "172.18.", "172.19.", "172.20.", "172.21.", "172.22.", "172.23.", "172.24.", "172.25.", "172.26.", "172.27.", "172.28.", "172.29.", "172.30.", "172.31.", "192.168."];
+    let url_lower = webhook_url.to_lowercase();
+    for prefix in &blocked {
+        if url_lower.contains(prefix) {
+            warn!("[webhook] rejecting webhook URL pointing to internal address: {}", webhook_url);
+            return;
+        }
     }
 
     let event = event.to_string();

@@ -4,6 +4,7 @@ use hmac::{Hmac, Mac};
 use log::{debug, error, info, warn};
 use rand::Rng;
 use sha1::Sha1;
+use std::env;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 type HmacSha1 = Hmac<Sha1>;
@@ -20,8 +21,12 @@ pub fn verify_password(password: &str, hash: &str) -> bool {
 }
 
 pub fn hash_password(password: &str) -> Result<String, bcrypt::BcryptError> {
-    debug!("[auth] hashing password with bcrypt cost={}", DEFAULT_COST);
-    let result = hash(password, DEFAULT_COST)?;
+    let cost: u32 = std::env::var("BCRYPT_COST")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(DEFAULT_COST);
+    debug!("[auth] hashing password with bcrypt cost={}", cost);
+    let result = hash(password, cost)?;
     debug!("[auth] password hashed successfully");
     Ok(result)
 }

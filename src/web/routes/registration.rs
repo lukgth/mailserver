@@ -232,6 +232,21 @@ pub async fn handle_form(
         }
     };
 
+    // Validate username first (before consuming invite code)
+    if let Err(reason) = validate_username(&username, &domain_obj.registration_username_regex) {
+        return re_render(&reason).await;
+    }
+
+    // Validate display name length
+    if name.len() > 128 {
+        return re_render("Display name must be 128 characters or fewer.").await;
+    }
+
+    // Validate invite code format (32 hex chars)
+    if invite_code.len() != 32 || !invite_code.chars().all(|c| c.is_ascii_hexdigit()) {
+        return re_render("Invalid invite code.").await;
+    }
+
     // Validate invite code
     if invite_code.is_empty() {
         return re_render("Invite code is required.").await;
@@ -248,21 +263,6 @@ pub async fn handle_form(
     if !code_valid {
         return re_render("Invalid or already used invite code.")
             .await;
-    }
-
-    // Validate username
-    if let Err(reason) = validate_username(&username, &domain_obj.registration_username_regex) {
-        return re_render(&reason).await;
-    }
-
-    // Validate display name length
-    if name.len() > 128 {
-        return re_render("Display name must be 128 characters or fewer.").await;
-    }
-
-    // Validate invite code format (32 hex chars)
-    if invite_code.len() != 32 || !invite_code.chars().all(|c| c.is_ascii_hexdigit()) {
-        return re_render("Invalid invite code.").await;
     }
 
     // Validate password

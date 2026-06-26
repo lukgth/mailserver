@@ -12,6 +12,7 @@ pub mod carddav;
 pub mod configs;
 pub mod dashboard;
 pub mod dmarc;
+pub mod dns_export;
 pub mod domains;
 pub mod fail2ban;
 pub mod footer;
@@ -135,6 +136,7 @@ pub fn auth_routes() -> Router<AppState> {
         .route("/invite-codes", get(invite_codes::list))
         .route("/invite-codes/generate", post(invite_codes::generate))
         .route("/invite-codes/:id/delete", post(invite_codes::delete_code))
+        .route("/dns-records", get(dns_export::page))
         .route("/configs", get(configs::page))
         .route("/api", get(api_docs::page))
         .route("/api/token/generate", post(api_docs::generate_token))

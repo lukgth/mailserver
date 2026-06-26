@@ -1,0 +1,32 @@
+{% extends "layout.html" %}
+{% block title %}DNS Records{% endblock %}
+{% block content %}
+<h1>DNS Records</h1>
+<p>These are the DNS records needed for each domain. Copy them to your DNS provider.</p>
+
+{% for d in domains %}
+<hr>
+<h2>{{ d.name }}</h2>
+
+<h3>Required Records</h3>
+<table>
+<tr><th>Type</th><th>Name</th><th>Value</th></tr>
+<tr><td>MX</td><td>@</td><td><code>{{ d.mx }}. 10 {{ d.name }}.</code></td></tr>
+<tr><td>A</td><td>{{ d.name }}</td><td><code>{{ d.a_record }}</code></td></tr>
+<tr><td>TXT</td><td>@</td><td><code>{{ d.spf }}</code></td></tr>
+<tr><td>TXT</td><td>{{ d.dkim_selector }}._domainkey</td><td><code>{{ d.dkim_key }}</code></td></tr>
+<tr><td>TXT</td><td>_dmarc</td><td><code>{{ d.dmarc }}</code></td></tr>
+</table>
+
+<h3>Copy All (one block)</h3>
+<pre>{{ d.name }}.        MX      10 {{ d.name }}.
+{{ d.name }}.        A       {{ d.a_record }}
+{{ d.name }}.        TXT     "{{ d.spf }}"
+_dmarc.{{ d.name }}.  TXT     "{{ d.dmarc }}"
+{{ d.dkim_selector }}._domainkey.{{ d.name }}.  TXT     "{{ d.dkim_key }}"</pre>
+{% endfor %}
+
+{% if domains.is_empty() %}
+<p>No active domains found.</p>
+{% endif %}
+{% endblock %}

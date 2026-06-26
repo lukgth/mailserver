@@ -120,6 +120,30 @@ services:
     networks:
       - internal
 
+  # Redis — required by Rspamd for quarantine storage and statistics
+  redis:
+    image: redis:7-alpine
+    volumes:
+      - redis-data:/data
+    restart: unless-stopped
+    networks:
+      - internal
+
+  # Rspamd — spam/virus/abuse filtering, DKIM signing, quarantine
+  rspamd:
+    image: rspamd/rspamd:latest
+    depends_on:
+      - redis
+    volumes:
+      - rspamd-data:/var/lib/rspamd
+      - rspamd-logs:/var/log/rspamd
+      - ./nginx/certs:/etc/letsencrypt:ro
+    environment:
+      - REDIS_HOST=redis
+    restart: unless-stopped
+    networks:
+      - internal
+
 networks:
   internal:
     driver: bridge
@@ -135,3 +159,6 @@ volumes:
     external: true
   # Ephemeral — safe to remove on down
   certbot-www:
+  redis-data:
+  rspamd-data:
+  rspamd-logs:

@@ -96,6 +96,7 @@ services:
   # After renewal, copies certs to /data/ssl/ and restarts mailserver to reload Postfix/Dovecot.
   certbot:
     image: certbot/certbot
+    restart: unless-stopped
     volumes:
       - certbot-www:/var/www/certbot
       - ./nginx/certs:/etc/letsencrypt

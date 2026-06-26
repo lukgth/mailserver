@@ -121,29 +121,16 @@ services:
     networks:
       - internal
 
-  # Redis — required by Rspamd for quarantine storage and statistics
-  redis:
-    image: redis:7-alpine
+  # SpamAssassin — spam filtering via milter (simpler than Rspamd)
+  spamassassin:
+    image: boky/spamassassin:latest
     volumes:
-      - redis-data:/data
-    restart: unless-stopped
-    networks:
-      - internal
-
-  # Rspamd — spam/virus/abuse filtering, DKIM signing, quarantine
-  rspamd:
-    image: rspamd/rspamd:latest
-    depends_on:
-      - redis
-    volumes:
-      - rspamd-data:/var/lib/rspamd
-      - rspamd-logs:/var/log/rspamd
-      - ./nginx/certs:/etc/letsencrypt:ro
+      - sa-data:/var/lib/spamassassin
+      - sa-logs:/var/log/spamassassin
     environment:
-      - REDIS_HOST=redis
+      - SA_OPTS=--allow-tell
     expose:
-      - "11333"  # milter port for Postfix
-      - "11334"  # controller API
+      - "783"  # spamd protocol (milter connects here)
     restart: unless-stopped
     networks:
       - internal
@@ -163,6 +150,5 @@ volumes:
     external: true
   # Ephemeral — safe to remove on down
   certbot-www:
-  redis-data:
-  rspamd-data:
-  rspamd-logs:
+  sa-data:
+  sa-logs:

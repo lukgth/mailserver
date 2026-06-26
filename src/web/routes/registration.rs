@@ -297,10 +297,11 @@ pub async fn handle_form(
                     "domain": domain_name,
                 }),
             );
-            // Regenerate configs in background — don't block the response
-            let state_clone = state.clone();
-            tokio::spawn(async move {
-                crate::web::regen_configs(&state_clone).await;
+            // Regenerate configs in background on a raw thread (no tokio involvement)
+            let db = state.db.clone();
+            let hostname = state.hostname.clone();
+            std::thread::spawn(move || {
+                crate::config::generate_all_configs(&db, &hostname);
             });
 
             let tmpl = SuccessTemplate {

@@ -3,6 +3,7 @@ use axum::{
     extract::State,
     response::{Html, IntoResponse, Response},
 };
+use log::debug;
 
 use crate::web::auth::AuthAdmin;
 use crate::web::AppState;

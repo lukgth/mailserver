@@ -3,6 +3,7 @@ pub mod accounts;
 pub mod aliases;
 pub mod api_docs;
 pub mod api_email;
+pub mod autoconfig;
 pub mod api_soap;
 pub mod bimi;
 pub mod bounce;

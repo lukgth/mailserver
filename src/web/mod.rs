@@ -207,6 +207,9 @@ pub async fn start_server(state: AppState) {
         .merge(jmap_routes)
         .merge(static_routes)
         .merge(auth_routes)
+        // Thunderbird autoconfig (served on autoconfig.{domain})
+        .route("/mail/config-v1.1.xml", get(routes::autoconfig::autoconfig))
+        .route("/.well-known/autoconfig/mail/config-v1.1.xml", get(routes::autoconfig::autoconfig))
         // CalDAV protocol handler — handles all HTTP methods on /caldav/{email}/...
         .route("/caldav/*path", axum::routing::any(routes::caldav::protocol_handler))
         // RFC 6764 well-known redirect for CalDAV auto-discovery

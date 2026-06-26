@@ -67,6 +67,7 @@ services:
       - "${POP3S_PORT:-995}:995"
     volumes:
       - maildata:/data
+      - ./nginx/certs:/etc/letsencrypt:ro
     # Docker socket mount removed for security.
     # If you need container restart from admin UI, mount read-only:
     # - /var/run/docker.sock:/var/run/docker.sock:ro

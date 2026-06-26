@@ -299,18 +299,19 @@ pub async fn handle_form(
                 "[register] new account created: {}@{}",
                 username, domain_name
             );
-            fire_webhook(
-                &state,
-                "account.registered",
-                serde_json::json!({
-                    "username": username,
-                    "domain": domain_name,
-                }),
-            );
-            // Regenerate configs via subprocess (avoids postgres runtime conflict)
-            info!("[register] spawning genconfig subprocess");
+            // Fire webhook and regenerate configs on background thread
+            // (avoids postgres runtime conflict — db access must not happen in tokio context)
+            let db = state.db.clone();
             let hostname = state.hostname.clone();
+            let webhook_user = username.clone();
+            let webhook_domain = domain_name.clone();
             std::thread::spawn(move || {
+                // Fire webhook from this thread (no tokio runtime)
+                fire_webhook_with_db(&db, "account.registered", serde_json::json!({
+                    "username": webhook_user,
+                    "domain": webhook_domain,
+                }));
+                // Regenerate configs via subprocess
                 let output = std::process::Command::new("/usr/local/bin/mailserver")
                     .arg("genconfig")
                     .env("HOSTNAME", &hostname)

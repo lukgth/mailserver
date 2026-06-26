@@ -405,3 +405,48 @@ pub(crate) fn fire_webhook(state: &AppState, event: &str, details: serde_json::V
         );
     });
 }
+
+/// Fire a webhook using a Database reference directly (safe for background threads — no tokio runtime).
+pub(crate) fn fire_webhook_with_db(db: &crate::db::Database, event: &str, details: serde_json::Value) {
+    let webhook_url = db.get_setting("webhook_url").unwrap_or_default();
+    if webhook_url.is_empty() { return; }
+    if !webhook_url.starts_with("https://") {
+        warn!("[webhook] rejecting non-HTTPS webhook URL: {}", webhook_url);
+        return;
+    }
+    let blocked = ["127.0.0.1", "localhost", "::1", "0.0.0.0", "10.", "172.16.", "172.17.", "172.18.", "172.19.", "172.20.", "172.21.", "172.22.", "172.23.", "172.24.", "172.25.", "172.26.", "172.27.", "172.28.", "172.29.", "172.30.", "172.31.", "192.168."];
+    let url_lower = webhook_url.to_lowercase();
+    for prefix in &blocked {
+        if url_lower.contains(prefix) {
+            warn!("[webhook] rejecting webhook URL pointing to internal address: {}", webhook_url);
+            return;
+        }
+    }
+    let event = event.to_string();
+    let timestamp = chrono::Utc::now().to_rfc3339();
+    let payload = serde_json::json!({ "event": event, "timestamp": timestamp, "details": details });
+    let request_body = payload.to_string();
+    debug!("[webhook] firing {} to {}", event, webhook_url);
+    let start = std::time::Instant::now();
+    let (response_status, response_body, error) = match reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(10)).build()
+    {
+        Ok(client) => match client.post(&webhook_url).json(&payload).send() {
+            Ok(resp) => {
+                let status = resp.status().as_u16() as i32;
+                let body = resp.text().unwrap_or_default();
+                let body_truncated = if body.len() > 2048 { body[..2048].to_string() } else { body };
+                (status, body_truncated, String::new())
+            }
+            Err(e) => (-1, String::new(), e.to_string()),
+        },
+        Err(e) => (-1, String::new(), e.to_string()),
+    };
+    let duration_ms = start.elapsed().as_millis() as u64;
+    if error.is_empty() {
+        info!("[webhook] {} delivered (status={}) in {}ms", event, response_status, duration_ms);
+    } else {
+        warn!("[webhook] {} failed (status={}, error={}) in {}ms", event, response_status, error, duration_ms);
+    }
+    db.log_webhook(&webhook_url, &request_body, response_status, &response_body, &error, duration_ms, &event, "");
+}

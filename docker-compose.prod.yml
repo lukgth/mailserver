@@ -141,6 +141,24 @@ services:
     networks:
       - internal
 
+  # Roundcube webmail client
+  roundcube:
+    image: roundcube/roundcubemail:latest
+    depends_on:
+      - mailserver
+    environment:
+      ROUNDCUBEMAIL_DB_TYPE: sqlite
+      ROUNDCUBEMAIL_SKIN: elastic
+      ROUNDCUBEMAIL_DEFAULT_HOST: ssl://mailserver
+      ROUNDCUBEMAIL_DEFAULT_PORT: "993"
+      ROUNDCUBEMAIL_SMTP_SERVER: tls://mailserver
+      ROUNDCUBEMAIL_SMTP_PORT: "587"
+    volumes:
+      - roundcube-db:/var/roundcube/db
+    restart: unless-stopped
+    networks:
+      - internal
+
 networks:
   internal:
     driver: bridge
@@ -156,3 +174,4 @@ volumes:
     external: true
   # Ephemeral — safe to remove on down
   certbot-www:
+  roundcube-db:

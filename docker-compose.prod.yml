@@ -92,13 +92,30 @@ services:
       - internal
 
   # Let's Encrypt certbot — auto-renews TLS certificates every 12h.
-  # Initial cert: docker compose -f docker-compose.prod.yml run --rm certbot
+  # After renewal, copies certs to /data/ssl/ and restarts mailserver to reload Postfix/Dovecot.
   certbot:
     image: certbot/certbot
     volumes:
       - certbot-www:/var/www/certbot
       - ./nginx/certs:/etc/letsencrypt
-    entrypoint: "/bin/sh -c 'trap exit TERM; while :; do certbot renew; sleep 12h & wait $${!}; done;'"
+      - maildata:/data
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    entrypoint: >
+      /bin/sh -c 'trap exit TERM; while :;
+      do
+        certbot renew --quiet;
+        DOMAIN="${HOSTNAME:-mail.example.com}";
+        if [ -f "/etc/letsencrypt/live/$${DOMAIN}/fullchain.pem" ]; then
+          cp "/etc/letsencrypt/live/$${DOMAIN}/fullchain.pem" /data/ssl/cert.pem;
+          cp "/etc/letsencrypt/live/$${DOMAIN}/privkey.pem" /data/ssl/key.pem;
+          chmod 600 /data/ssl/key.pem;
+          chmod 644 /data/ssl/cert.pem;
+          echo "[certbot] certs renewed, restarting mailserver";
+          docker restart mailserver-mailserver-1 2>/dev/null || true;
+        fi;
+        sleep 12h &
+        wait $${!};
+      done'
     networks:
       - internal
 

@@ -4,6 +4,19 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex, MutexGuard};
 
+/// Constant-time comparison of two byte slices to prevent timing side-channels.
+/// Returns false immediately on length mismatch (length is not secret).
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut result = 0u8;
+    for (x, y) in a.iter().zip(b.iter()) {
+        result |= x ^ y;
+    }
+    result == 0
+}
+
 fn now() -> String {
     chrono::Utc::now().format("%Y-%m-%d %H:%M:%S").to_string()
 }
@@ -1954,7 +1967,9 @@ impl Database {
     }
 
     pub fn verify_api_token(&self, token: &str) -> bool {
-        self.get_api_token().map(|t| t == token).unwrap_or(false)
+        self.get_api_token()
+            .map(|stored| constant_time_eq(stored.as_bytes(), token.as_bytes()))
+            .unwrap_or(false)
     }
 
     /// Check if an email address exists as an active account

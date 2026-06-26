@@ -157,7 +157,7 @@ pub async fn create(
         "[web] POST /accounts — creating account username={}, domain_id={}",
         form.username, form.domain_id
     );
-    let db_hash = match crate::auth::hash_password(&form.password) {
+    let db_hash = match crate::auth::validate_password_length(&form.password).and_then(|_| crate::auth::hash_password(&form.password)) {
         Ok(h) => h,
         Err(e) => {
             error!(
@@ -267,15 +267,19 @@ pub async fn update(
     // Only update password if field is not empty
     if let Some(ref pw) = form.password {
         if !pw.is_empty() {
-            info!("[web] updating password for account id={}", id);
-            match crate::auth::hash_password(pw) {
-                Ok(db_hash) => {
-                    state
-                        .blocking_db(move |db| db.update_account_password(id, &db_hash))
-                        .await;
-                }
-                Err(e) => {
-                    error!("[web] failed to hash password for account id={}: {}", id, e);
+            if let Err(e) = crate::auth::validate_password_length(pw) {
+                warn!("[web] password update failed — {} for account id={}", e, id);
+            } else {
+                info!("[web] updating password for account id={}", id);
+                match crate::auth::hash_password(pw) {
+                    Ok(db_hash) => {
+                        state
+                            .blocking_db(move |db| db.update_account_password(id, &db_hash))
+                            .await;
+                    }
+                    Err(e) => {
+                        error!("[web] failed to hash password for account id={}: {}", id, e);
+                    }
                 }
             }
         }

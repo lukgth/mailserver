@@ -66,7 +66,7 @@ footer { margin-top: 2em; border-top: 1px solid #ccc; padding-top: 0.5em; font-s
 <a href="/abuse"{% if nav_active == "Abuse" %} aria-current="page"{% endif %}>abuse</a>
 <a href="/bounce"{% if nav_active == "Bounces" %} aria-current="page"{% endif %}>bounces</a>
 <a href="/fail2ban"{% if nav_active == "Fail2ban" %} aria-current="page"{% endif %}>fail2ban</a>
-<a href="/webmail"{% if nav_active == "Webmail" %} aria-current="page"{% endif %}>webmail</a>
+<a href="/mailbox"{% if nav_active == "Webmail" %} aria-current="page"{% endif %}>webmail</a>
 <a href="/imap-idle"{% if nav_active == "IMAP IDLE" %} aria-current="page"{% endif %}>imap-idle</a>
 <a href="/caldav"{% if nav_active == "CalDAV" %} aria-current="page"{% endif %}>caldav</a>
 <a href="/carddav"{% if nav_active == "CardDAV" %} aria-current="page"{% endif %}>carddav</a>
@@ -78,6 +78,8 @@ footer { margin-top: 2em; border-top: 1px solid #ccc; padding-top: 0.5em; font-s
 <a href="/dns-records"{% if nav_active == "DNS Records" %} aria-current="page"{% endif %}>dns-records</a>
 <a href="/configs"{% if nav_active == "Configs" %} aria-current="page"{% endif %}>configs</a>
 <a href="/settings"{% if nav_active == "Settings" %} aria-current="page"{% endif %}>settings</a>
+<span style="margin-left:auto"></span>
+<a href="/logout" title="Clear saved credentials and return to login">logout</a>
 </div>
 <hr>
 {% endif %}
@@ -141,5 +143,20 @@ footer { margin-top: 2em; border-top: 1px solid #ccc; padding-top: 0.5em; font-s
 })();
 </script>
 {% endif %}
+<script>
+// CSRF: inject hidden field into every POST form
+(function(){
+  var m = document.cookie.match(/csrf_token=([^;]+)/);
+  if (!m) return;
+  var token = m[1];
+  document.querySelectorAll('form[method=post]').forEach(function(f){
+    if (!f.querySelector('input[name=_csrf_token]')) {
+      var h = document.createElement('input');
+      h.type = 'hidden'; h.name = '_csrf_token'; h.value = token;
+      f.appendChild(h);
+    }
+  });
+})();
+</script>
 </body>
 </html>

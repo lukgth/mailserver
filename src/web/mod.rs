@@ -3,8 +3,8 @@ mod errors;
 mod forms;
 pub mod routes;
 
-use axum::http::{HeaderValue, StatusCode, Uri};
-use axum::response::Response;
+use axum::http::{header, HeaderValue, Method, StatusCode, Uri};
+use axum::response::{IntoResponse, Response};
 use axum::routing::{get, get_service};
 use axum::Router;
 use log::{debug, info, warn};
@@ -19,7 +19,7 @@ use tower_http::services::ServeDir;
 
 use crate::web::errors::status_response;
 
-// ── IMAP IDLE session tracking ────────────────────────────────────────────────
+
 
 /// Represents one active IMAP-IDLE (SSE) connection from the webmail client.
 #[derive(Clone, Serialize)]
@@ -130,6 +130,127 @@ impl McpGuard {
             } else {
                 None
             }
+        }
+    }
+}
+
+// ── CSRF double-submit cookie middleware ──────────────────────────────────────
+//
+// On every response: ensure a `csrf_token` cookie is set (SameSite=Strict).
+// On POST/PUT/DELETE: validate that the form field `_csrf_token` matches
+// the cookie value. This prevents cross-site form forgery even with
+// HTTP Basic Auth, because the attacker cannot read the cookie from
+// another origin.
+const CSRF_COOKIE: &str = "csrf_token";
+const CSRF_FIELD: &str = "_csrf_token";
+
+/// Generate a short random hex token (16 bytes = 32 hex chars).
+fn generate_csrf_token() -> String {
+    use rand::Rng;
+    let mut rng = rand::thread_rng();
+    (0..16).map(|_| format!("{:02x}", rng.gen::<u8>())).collect()
+}
+
+/// Extract CSRF token from request cookie.
+fn csrf_token_from_cookie(headers: &axum::http::HeaderMap) -> Option<String> {
+    headers
+        .get(header::COOKIE)?
+        .to_str()
+        .ok()?
+        .split(';')
+        .find_map(|c| {
+            let c = c.trim();
+            c.strip_prefix("csrf_token=").map(|v| v.to_string())
+        })
+}
+
+/// CSRF middleware: sets cookie on response, validates on mutation requests.
+pub async fn csrf_middleware(
+    req: axum::http::Request<axum::body::Body>,
+    next: axum::middleware::Next,
+) -> Response {
+    let method = req.method().clone();
+    let cookie_token = csrf_token_from_cookie(req.headers());
+
+    // For POST/PUT/DELETE, validate the CSRF token
+    if method == Method::POST || method == Method::PUT || method == Method::DELETE {
+        if let Some(ref cookie_val) = cookie_token {
+            // Extract X-CSRF-Token header before consuming request
+            let header_token = req
+                .headers()
+                .get("x-csrf-token")
+                .and_then(|v| v.to_str().ok())
+                .map(|s| s.to_string());
+
+            let (parts, body) = req.into_parts();
+            let bytes = match axum::body::to_bytes(body, 1024 * 64).await {
+                Ok(b) => b,
+                Err(_) => {
+                    return (StatusCode::BAD_REQUEST, "Bad request").into_response();
+                }
+            };
+
+            // Parse _csrf_token from form body
+            let form_token = if method == Method::POST {
+                let body_str = String::from_utf8_lossy(&bytes);
+                body_str.split('&').find_map(|pair| {
+                    let mut kv = pair.splitn(2, '=');
+                    let k = kv.next()?;
+                    if k == CSRF_FIELD {
+                        let v = kv.next()?;
+                        Some(v.replace('+', " "))
+                    } else {
+                        None
+                    }
+                })
+            } else {
+                None
+            };
+
+            let submitted = form_token.or(header_token);
+            match submitted {
+                Some(ref t) if t == cookie_val => {
+                    // Valid — reconstruct request with original body
+                    let mut builder = axum::http::Request::builder()
+                        .method(parts.method)
+                        .uri(parts.uri);
+                    for (k, v) in parts.headers.iter() {
+                        builder = builder.header(k.clone(), v.clone());
+                    }
+                    let req = match builder.body(axum::body::Body::from(bytes)) {
+                        Ok(r) => r,
+                        Err(_) => {
+                            return (StatusCode::INTERNAL_SERVER_ERROR, "Internal error").into_response();
+                        }
+                    };
+                    let mut response = next.run(req).await;
+                    ensure_csrf_cookie(&mut response, &cookie_token);
+                    return response;
+                }
+                _ => {
+                    warn!("[csrf] token mismatch — rejecting mutation request");
+                    return (StatusCode::FORBIDDEN, "CSRF token mismatch").into_response();
+                }
+            }
+        } else {
+            warn!("[csrf] no CSRF cookie on mutation request");
+            return (StatusCode::FORBIDDEN, "Missing CSRF token").into_response();
+        }
+    }
+
+    // For GET and other safe methods, just ensure cookie exists and continue
+    let mut response = next.run(req).await;
+    ensure_csrf_cookie(&mut response, &cookie_token);
+    response
+}
+
+/// Set the CSRF cookie if not already present.
+fn ensure_csrf_cookie(response: &mut Response, existing: &Option<String>) {
+    if existing.is_none() {
+        let token = generate_csrf_token();
+        let cookie_val = format!("{}={}; Path=/; SameSite=Strict; HttpOnly=false", CSRF_COOKIE, token);
+        if let Ok(val) = HeaderValue::from_str(&cookie_val) {
+            response.headers_mut().insert(header::SET_COOKIE, val);
         }
     }
 }
@@ -248,7 +369,8 @@ pub async fn start_server(state: AppState) {
             axum::http::header::X_FRAME_OPTIONS,
             HeaderValue::from_static("DENY"),
         ))
-        .with_state(state);
+        .with_state(state)
+        .layer(axum::middleware::from_fn(csrf_middleware));
 
     let addr = format!("0.0.0.0:{}", port);
     let listener = tokio::net::TcpListener::bind(&addr)

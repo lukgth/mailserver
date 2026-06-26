@@ -2,7 +2,7 @@
 {% block title %}Webmail{% endblock %}
 {% block content %}
 <h1>Webmail</h1>
-<form method="get" action="/webmail">
+<form method="get" action="/mailbox">
   <label for="account_id">Account:</label>
   <select name="account_id" id="account_id">
     <option value="">— Select account —</option>
@@ -11,7 +11,7 @@
     {% endfor %}
   </select>
   <button type="submit">Select</button>
-  <a href="/webmail/compose{% if let Some(sel) = selected_account %}?account_id={{ sel.id }}{% endif %}">Compose</a>
+  <a href="/mailbox/compose{% if let Some(sel) = selected_account %}?account_id={{ sel.id }}{% endif %}">Compose</a>
 </form>
 
 {% if let Some(sel) = selected_account %}
@@ -31,7 +31,7 @@
       {% for group in folder_groups %}
       {% if group.children.is_empty() %}
       <li>
-        <a href="/webmail?account_id={{ sel.id }}&folder={{ group.folder.name }}"
+        <a href="/mailbox?account_id={{ sel.id }}&folder={{ group.folder.name }}"
            {% if group.folder.name == current_folder %}aria-current="page"{% endif %}>
           {{ group.folder.display_name }}
         </a>
@@ -40,7 +40,7 @@
       <li>
         <details {% if group.open %}open{% endif %}>
           <summary>
-            <a href="/webmail?account_id={{ sel.id }}&folder={{ group.folder.name }}"
+            <a href="/mailbox?account_id={{ sel.id }}&folder={{ group.folder.name }}"
                {% if group.folder.name == current_folder %}aria-current="page"{% endif %}>
               {{ group.folder.display_name }}
             </a>
@@ -48,7 +48,7 @@
           <ul>
             {% for child in group.children %}
             <li>
-              <a href="/webmail?account_id={{ sel.id }}&folder={{ child.name }}"
+              <a href="/mailbox?account_id={{ sel.id }}&folder={{ child.name }}"
                  class="webmail-folder-link" style="--folder-depth: {{ child.depth }}"
                  {% if child.name == current_folder %}aria-current="page"{% endif %}>
                 {{ child.display_name }}
@@ -73,17 +73,17 @@
       <thead>
         <tr>
           <th>
-            <a href="/webmail?account_id={{ sel.id }}&folder={{ current_folder }}&sort_by=date&sort_order={% if sort_by == "date" %}{% if sort_order == "desc" %}asc{% else %}desc{% endif %}{% else %}desc{% endif %}&page=1">
+            <a href="/mailbox?account_id={{ sel.id }}&folder={{ current_folder }}&sort_by=date&sort_order={% if sort_by == "date" %}{% if sort_order == "desc" %}asc{% else %}desc{% endif %}{% else %}desc{% endif %}&page=1">
               Date{% if sort_by == "date" %}{% if sort_order == "desc" %} ▼{% else %} ▲{% endif %}{% endif %}
             </a>
           </th>
           <th>
-            <a href="/webmail?account_id={{ sel.id }}&folder={{ current_folder }}&sort_by=from&sort_order={% if sort_by == "from" %}{% if sort_order == "asc" %}desc{% else %}asc{% endif %}{% else %}asc{% endif %}&page=1">
+            <a href="/mailbox?account_id={{ sel.id }}&folder={{ current_folder }}&sort_by=from&sort_order={% if sort_by == "from" %}{% if sort_order == "asc" %}desc{% else %}asc{% endif %}{% else %}asc{% endif %}&page=1">
               From{% if sort_by == "from" %}{% if sort_order == "asc" %} ▲{% else %} ▼{% endif %}{% endif %}
             </a>
           </th>
           <th>
-            <a href="/webmail?account_id={{ sel.id }}&folder={{ current_folder }}&sort_by=subject&sort_order={% if sort_by == "subject" %}{% if sort_order == "asc" %}desc{% else %}asc{% endif %}{% else %}asc{% endif %}&page=1">
+            <a href="/mailbox?account_id={{ sel.id }}&folder={{ current_folder }}&sort_by=subject&sort_order={% if sort_by == "subject" %}{% if sort_order == "asc" %}desc{% else %}asc{% endif %}{% else %}asc{% endif %}&page=1">
               Subject{% if sort_by == "subject" %}{% if sort_order == "asc" %} ▲{% else %} ▼{% endif %}{% endif %}
             </a>
           </th>
@@ -102,10 +102,10 @@
             {% if email.is_spam %}<span class="badge-spam" title="Flagged as spam">⚠ Spam</span>{% endif %}
           </td>
           <td>
-            <a href="/webmail/view/{{ email.filename }}?account_id={{ sel.id }}&folder={{ current_folder }}" class="button-small" aria-label="View email: {{ email.subject }}">View</a>
-            <a href="/webmail/reply/{{ email.filename }}?account_id={{ sel.id }}&folder={{ current_folder }}" class="button-small" aria-label="Reply to email: {{ email.subject }}">Reply</a>
-            <a href="/webmail/download/{{ email.filename }}?account_id={{ sel.id }}&folder={{ current_folder }}" class="button-small" aria-label="Download email: {{ email.subject }}">Download</a>
-            <form method="post" action="/webmail/delete/{{ email.filename }}" class="form-inline">
+            <a href="/mailbox/view/{{ email.filename }}?account_id={{ sel.id }}&folder={{ current_folder }}" class="button-small" aria-label="View email: {{ email.subject }}">View</a>
+            <a href="/mailbox/reply/{{ email.filename }}?account_id={{ sel.id }}&folder={{ current_folder }}" class="button-small" aria-label="Reply to email: {{ email.subject }}">Reply</a>
+            <a href="/mailbox/download/{{ email.filename }}?account_id={{ sel.id }}&folder={{ current_folder }}" class="button-small" aria-label="Download email: {{ email.subject }}">Download</a>
+            <form method="post" action="/mailbox/delete/{{ email.filename }}" class="form-inline">
               <input type="hidden" name="account_id" value="{{ sel.id }}">
               <input type="hidden" name="folder" value="{{ current_folder }}">
               <button type="submit" class="button-danger button-small">Delete</button>
@@ -120,11 +120,11 @@
     {% if total_pages > 1 %}
     <nav class="pagination" aria-label="Pagination">
       {% if let Some(p) = prev_page %}
-      <a href="/webmail?account_id={{ sel.id }}&folder={{ current_folder }}&sort_by={{ sort_by }}&sort_order={{ sort_order }}&page={{ p }}">← Previous</a>
+      <a href="/mailbox?account_id={{ sel.id }}&folder={{ current_folder }}&sort_by={{ sort_by }}&sort_order={{ sort_order }}&page={{ p }}">← Previous</a>
       {% endif %}
       <span>Page {{ current_page }} of {{ total_pages }}</span>
       {% if let Some(n) = next_page %}
-      <a href="/webmail?account_id={{ sel.id }}&folder={{ current_folder }}&sort_by={{ sort_by }}&sort_order={{ sort_order }}&page={{ n }}">Next →</a>
+      <a href="/mailbox?account_id={{ sel.id }}&folder={{ current_folder }}&sort_by={{ sort_by }}&sort_order={{ sort_order }}&page={{ n }}">Next →</a>
       {% endif %}
     </nav>
     {% endif %}
@@ -144,7 +144,7 @@
   var knownNewCount = null;
 
   function openIdleConnection() {
-    var url = "/webmail/idle?account_id=" + encodeURIComponent(accountId)
+    var url = "/mailbox/idle?account_id=" + encodeURIComponent(accountId)
               + "&folder=" + encodeURIComponent(folder);
     var es  = new EventSource(url);
 

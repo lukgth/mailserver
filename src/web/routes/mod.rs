@@ -101,14 +101,15 @@ pub fn auth_routes() -> Router<AppState> {
         .route("/queue/:id/delete", post(queue::delete_message))
         .route("/queue/:id/flush", post(queue::flush_message))
         .route("/quarantine", get(quarantine::list))
-        .route("/webmail", get(webmail::inbox))
-        .route("/webmail/view/:filename", get(webmail::view_email))
-        .route("/webmail/download/:filename", get(webmail::download_email))
-        .route("/webmail/reply/:filename", get(webmail::reply_email))
-        .route("/webmail/delete/:filename", post(webmail::delete_email))
-        .route("/webmail/compose", get(webmail::compose))
-        .route("/webmail/send", post(webmail::send_email))
-        .route("/webmail/idle", get(webmail::idle_stream))
+        .route("/logout", get(logout_handler))
+        .route("/mailbox", get(webmail::inbox))
+        .route("/mailbox/view/:filename", get(webmail::view_email))
+        .route("/mailbox/download/:filename", get(webmail::download_email))
+        .route("/mailbox/reply/:filename", get(webmail::reply_email))
+        .route("/mailbox/delete/:filename", post(webmail::delete_email))
+        .route("/mailbox/compose", get(webmail::compose))
+        .route("/mailbox/send", post(webmail::send_email))
+        .route("/mailbox/idle", get(webmail::idle_stream))
         .route("/imap-idle", get(imap_idle::list))
         .route(
             "/imap-idle/disconnect-all",
@@ -229,6 +230,26 @@ pub fn auth_routes() -> Router<AppState> {
             "/rate-limits/rules/:id/delete",
             post(rate_limits::delete_rule),
         )
+}
+
+/// Logout handler — returns 401 with WWW-Authenticate to clear browser credentials.
+async fn logout_handler() -> Response {
+    use axum::http::{header, StatusCode};
+    use axum::response::Html;
+
+    let body = crate::web::errors::render_error_page(
+        StatusCode::UNAUTHORIZED,
+        "Logged Out",
+        "Your credentials have been cleared. Close this tab or enter new credentials to log back in.",
+        "/",
+        "Dashboard",
+    );
+    Response::builder()
+        .status(StatusCode::UNAUTHORIZED)
+        .header(header::WWW_AUTHENTICATE, "Basic realm="Mailserver Admin", charset=\"UTF-8\"")
+        .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
+        .body(axum::body::Body::from(body.0))
+        .expect("Failed to build logout response")
 }
 
 pub fn registration_routes() -> Router<AppState> {

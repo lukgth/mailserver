@@ -1138,7 +1138,7 @@ pub async fn delete_email(
     }
 
     let redirect_url = format!(
-        "/webmail?account_id={}&folder={}",
+        "/mailbox?account_id={}&folder={}",
         acct.id,
         urlencoding_simple(folder)
     );

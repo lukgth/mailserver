@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 use crate::db::Database;
 
 const MAIL_LOG_PATH: &str = "/var/log/mail.log";
+const WEB_AUTH_LOG_PATH: &str = "/var/log/mail.log";
 const POLL_INTERVAL: Duration = Duration::from_secs(5);
 const ENABLED_CACHE_TTL: Duration = Duration::from_secs(30);
 
@@ -26,6 +27,7 @@ static POSTFIX_SASL: OnceLock<Regex> = OnceLock::new();
 static DOVECOT_AUTH: OnceLock<Regex> = OnceLock::new();
 static DOVECOT_INVALID: OnceLock<Regex> = OnceLock::new();
 static POSTFIX_ERRORS: OnceLock<Regex> = OnceLock::new();
+static WEB_AUTH_FAILURE: OnceLock<Regex> = OnceLock::new();
 
 fn postfix_sasl_re() -> &'static Regex {
     POSTFIX_SASL.get_or_init(|| {
@@ -53,6 +55,13 @@ fn dovecot_invalid_re() -> &'static Regex {
 fn postfix_errors_re() -> &'static Regex {
     POSTFIX_ERRORS.get_or_init(|| {
         Regex::new(r"postfix/smtpd\[\d+\]: warning: [^\[]*\[([0-9a-fA-F.:]+)\]: too many errors")
+            .expect("Invalid regex")
+    })
+}
+
+fn web_auth_re() -> &'static Regex {
+    WEB_AUTH_FAILURE.get_or_init(|| {
+        Regex::new(r"mailserver/web\[\d+\]: \[web\] authentication failed.*from ([0-9a-fA-F.:]+)")
             .expect("Invalid regex")
     })
 }
@@ -108,7 +117,40 @@ pub fn parse_log_line(line: &str) -> Option<AuthFailure> {
         });
     }
 
+    // Web admin auth failure
+    if let Some(caps) = web_auth_re().captures(line) {
+        return Some(AuthFailure {
+            ip: caps[1].to_string(),
+            service: "web".to_string(),
+            detail: line.to_string(),
+        });
+    }
+
     None
+}
+
+/// Record a web auth failure to the mail log for fail2ban monitoring.
+pub fn record_web_auth_failure(ip: &str, username: &str) {
+    // Write in a format the parser can match
+    let ts = chrono::Utc::now().format("%b %d %H:%M:%S").to_string();
+    let line = format!(
+        "{} mailserver/web[{}]: [web] authentication failed — from {} user={}",
+        ts,
+        std::process::id(),
+        ip,
+        username,
+    );
+    if let Err(e) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(WEB_AUTH_LOG_PATH)
+        .and_then(|mut f| {
+            use std::io::Write;
+            writeln!(f, "{}", line)
+        })
+    {
+        debug!("[fail2ban] failed to write web auth log: {}", e);
+    }
 }
 
 /// Process a detected auth failure: record, count, and potentially ban the IP.

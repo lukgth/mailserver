@@ -6,6 +6,20 @@ use rand::Rng;
 use sha1::Sha1;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+/// Minimum password length for all users.
+pub const MIN_PASSWORD_LENGTH: usize = 8;
+
+/// Validate password meets minimum length requirements.
+pub fn validate_password_length(password: &str) -> Result<(), String> {
+    if password.len() < MIN_PASSWORD_LENGTH {
+        return Err(format!(
+            "Password must be at least {} characters long.",
+            MIN_PASSWORD_LENGTH
+        ));
+    }
+    Ok(())
+}
+
 type HmacSha1 = Hmac<Sha1>;
 
 pub fn verify_password(password: &str, hash: &str) -> bool {

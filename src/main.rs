@@ -163,10 +163,14 @@ fn main() {
                 "admin".to_string()
             });
             let password = env::var("SEED_PASS").unwrap_or_else(|_| {
-                debug!("[seed] SEED_PASS not set, defaulting to admin");
-                "admin".to_string()
+                debug!("[seed] SEED_PASS not set, defaulting to adminadmin");
+                "adminadmin".to_string()
             });
 
+            if let Err(e) = auth::validate_password_length(&password) {
+                error!("[seed] {}", e);
+                std::process::exit(1);
+            }
             info!("[seed] seeding admin user: {}", username);
             let database = db::Database::open(&db_url);
             let hash = auth::hash_password(&password).unwrap_or_else(|e| {
@@ -194,6 +198,10 @@ fn main() {
             });
 
             info!("[reset-password] resetting password for admin user: {}", username);
+            if let Err(e) = auth::validate_password_length(&password) {
+                error!("[reset-password] {}", e);
+                std::process::exit(1);
+            }
             let database = db::Database::open(&db_url);
             let admin = database.get_admin_by_username(&username).unwrap_or_else(|| {
                 error!("[reset-password] admin user not found: {}", username);

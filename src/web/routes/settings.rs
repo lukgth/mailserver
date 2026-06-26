@@ -353,6 +353,20 @@ pub async fn change_password(
         };
         return Html(tmpl.render().unwrap()).into_response();
     }
+    if let Err(e) = crate::auth::validate_password_length(&form.new_password) {
+        warn!("[web] password change failed — {} for username={}", e, auth.admin.username);
+        let tmpl = ErrorTemplate {
+            nav_active: "Settings",
+            flash: None,
+            status_code: 400,
+            status_text: "Bad Request",
+            title: "Error",
+            message: &e,
+            back_url: "/settings",
+            back_label: "Back",
+        };
+        return Html(tmpl.render().unwrap()).into_response();
+    }
     let hash = match crate::auth::hash_password(&form.new_password) {
         Ok(h) => h,
         Err(e) => {

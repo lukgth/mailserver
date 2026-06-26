@@ -1,31 +1,37 @@
-{% extends "layout.html" %}
-{% block title %}Account Created{% endblock %}
-{% block content %}
-<h1>✓ Account Created</h1>
-<p>Your mailbox <strong>{{ email }}</strong> is ready to use.</p>
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Account Created</title>
+<style>
+body { font-family: monospace; max-width: 600px; margin: 2em auto; padding: 0 1em; line-height: 1.6; }
+h1 { font-size: 1.2em; border-bottom: 1px solid #ccc; padding-bottom: 0.5em; }
+h2 { font-size: 1em; margin-top: 1.5em; }
+table { width: 100%; border-collapse: collapse; margin: 1em 0; }
+th, td { text-align: left; padding: 0.3em 0.5em; border-bottom: 1px solid #eee; font-size: 0.9em; }
+th { border-bottom: 1px solid #ccc; }
+code { background: #f5f5f5; padding: 0.1em 0.3em; }
+.success { color: #090; }
+hr { border: none; border-top: 1px solid #ccc; margin: 1.5em 0; }
+</style>
+</head>
+<body>
+<h1><span class="success">*</span> Account Created</h1>
+<p>Your mailbox <strong>{{ email }}</strong> is ready.</p>
 
 <h2>Mail Client Settings</h2>
-<p>Use these settings to connect from Thunderbird, Outlook, Apple Mail, or any email app.</p>
-
 <table>
-<thead>
-  <tr><th>Protocol</th><th>Server</th><th>Port</th><th>Security</th><th>Username</th></tr>
-</thead>
-<tbody>
-  <tr><td><strong>IMAP</strong> (recommended)</td><td>{{ hostname }}</td><td>993</td><td>TLS/SSL</td><td>{{ email }}</td></tr>
-  <tr><td>IMAP (plain)</td><td>{{ hostname }}</td><td>143</td><td>STARTTLS</td><td>{{ email }}</td></tr>
-  <tr><td>POP3</td><td>{{ hostname }}</td><td>995</td><td>TLS/SSL</td><td>{{ email }}</td></tr>
-  <tr><td><strong>SMTP</strong> (sending)</td><td>{{ hostname }}</td><td>465</td><td>TLS/SSL</td><td>{{ email }}</td></tr>
-  <tr><td>SMTP (submission)</td><td>{{ hostname }}</td><td>587</td><td>STARTTLS</td><td>{{ email }}</td></tr>
-</tbody>
+<tr><th>Protocol</th><th>Server</th><th>Port</th><th>Security</th></tr>
+<tr><td>IMAP</td><td>{{ hostname }}</td><td>993</td><td>TLS/SSL</td></tr>
+<tr><td>IMAP (alt)</td><td>{{ hostname }}</td><td>143</td><td>STARTTLS</td></tr>
+<tr><td>POP3</td><td>{{ hostname }}</td><td>995</td><td>TLS/SSL</td></tr>
+<tr><td>SMTP</td><td>{{ hostname }}</td><td>465</td><td>TLS/SSL</td></tr>
+<tr><td>SMTP (alt)</td><td>{{ hostname }}</td><td>587</td><td>STARTTLS</td></tr>
 </table>
+<p><small>Username: <strong>{{ email }}</strong> &mdash; use the password you just set.</small></p>
 
-<h2>Password</h2>
-<p>Your password is the one you just set during registration. Write it down — it cannot be recovered.</p>
-
-<h2>Quick Links</h2>
-<ul>
-  <li><a href="/webmail">Webmail</a> — read email in your browser</li>
-  <li><a href="/register">Create another account</a></li>
-</ul>
-{% endblock %}
+<hr>
+<p><small><a href="/webmail">webmail</a> &mdash; <a href="/register">create another</a></small></p>
+</body>
+</html>

@@ -896,34 +896,8 @@ pub async fn dns_export(
     let dkim_selector = &domain.dkim_selector;
 
     let txt = format!(
-        """DNS Records for {domain_name}
-{sep}
-
-MX Record:
-{domain_name}.        MX      10 {hostname}.
-
-A Record:
-{domain_name}.        A       {hostname}
-
-SPF (TXT):
-{domain_name}.        TXT     "v=spf1 a mx include:{hostname} ~all"
-
-DKIM (TXT):
-{dkim_selector}._domainkey.{domain_name}.  TXT     "v=DKIM1; k=rsa; p={dkim_key}"
-
-DMARC (TXT):
-_dmarc.{domain_name}.  TXT     "v=DMARC1; p=reject; adkim=s; aspf=s; fo=1; rua=mailto:postmaster@{domain_name}; ruf=mailto:postmaster@{domain_name}"
-
-Thunderbird Autoconfig (CNAME):
-autoconfig.{domain_name}.    CNAME   {hostname}.
-
-IMAP Service Discovery (SRV):
-_imaps._tcp.{domain_name}.        SRV     0 1 993 {hostname}.
-
-SMTP Submission Discovery (SRV):
-_submission._tcp.{domain_name}.   SRV     0 1 587 {hostname}.
-""",
-        sep = "=".repeat(50),
+        "; DNS Records for {domain_name}\n; Cloudflare-compatible BIND zone file\n; Import at: https://dash.cloudflare.com/?to=/:zone/dns\n; TTL 3600 = 1 hour\n{sep}\n{domain_name}.\t3600\tMX\t10 {hostname}.\n{domain_name}.\t3600\tA\t{hostname}\n{domain_name}.\t3600\tTXT\t\"v=spf1 a mx include:{hostname} ~all\"\n{dkim_selector}._domainkey.{domain_name}.\t3600\tTXT\t\"v=DKIM1; k=rsa; p={dkim_key}\"\n_dmarc.{domain_name}.\t3600\tTXT\t\"v=DMARC1; p=reject; adkim=s; aspf=s; fo=1; rua=mailto:postmaster@{domain_name}; ruf=mailto:postmaster@{domain_name}\"\nautoconfig.{domain_name}.\t3600\tCNAME\t{hostname}.\n_imaps._tcp.{domain_name}.\t3600\tSRV\t0 1 993 {hostname}.\n_submission._tcp.{domain_name}.\t3600\tSRV\t0 1 587 {hostname}.\n",
+        sep = "; " + "=".repeat(48),
     );
 
     (

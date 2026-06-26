@@ -1,78 +1,75 @@
 <!DOCTYPE html>
-<html lang="en" data-theme="dark">
+<html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{% block title %}Mailserver{% endblock %}</title>
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap">
-<link rel="stylesheet" href="/static/style.css">
-<link rel="stylesheet" href="/static/desktop.css" media="(min-width: 768px)">
+<style>
+body { font-family: monospace; max-width: 960px; margin: 1em auto; padding: 0 1em; line-height: 1.5; color: #000; background: #fff; }
+h1 { font-size: 1.1em; border-bottom: 1px solid #ccc; padding-bottom: 0.3em; }
+h2 { font-size: 1em; margin-top: 1.5em; }
+a { color: #00c; }
+a:visited { color: #606; }
+a:hover { background: #eee; }
+table { width: 100%; border-collapse: collapse; margin: 0.5em 0; font-size: 0.9em; }
+th, td { text-align: left; padding: 0.2em 0.4em; border-bottom: 1px solid #ddd; }
+th { border-bottom: 2px solid #999; cursor: pointer; }
+th:hover { background: #eee; }
+tr:hover { background: #f5f5f5; }
+input, select, button, textarea { font-family: monospace; font-size: 0.9em; padding: 0.2em 0.4em; border: 1px solid #999; background: #fff; }
+button { cursor: pointer; }
+button:hover { background: #eee; }
+pre { background: #f5f5f5; padding: 0.5em; overflow-x: auto; }
+hr { border: none; border-top: 1px solid #ccc; margin: 1em 0; }
+small { color: #666; }
+.error { color: #c00; }
+.success { color: #090; }
+.nav { margin: 0.5em 0; }
+.nav a { margin-right: 0.5em; }
+.nav a[aria-current] { font-weight: bold; }
+footer { margin-top: 2em; border-top: 1px solid #ccc; padding-top: 0.5em; font-size: 0.8em; color: #666; }
+</style>
 </head>
 <body>
 {% if nav_active != "" %}
-<input type="checkbox" id="nav-toggle" class="nav-toggle">
-<label for="nav-toggle" class="nav-overlay" aria-hidden="true"></label>
-<header>
-  <label for="nav-toggle" class="nav-burger" aria-label="Toggle navigation">
-    <span></span><span></span><span></span>
-  </label>
-  <strong>Mailserver</strong>
-  <small>Control Panel</small>
-  <nav>
-    <a href="/"{% if nav_active == "Dashboard" %} aria-current="page"{% endif %}>Dashboard</a>
-    <div class="nav-group">
-      <span class="nav-group-label">Mail</span>
-      <a href="/domains"{% if nav_active == "Domains" %} aria-current="page"{% endif %}>Domains</a>
-      <a href="/accounts"{% if nav_active == "Accounts" %} aria-current="page"{% endif %}>Accounts</a>
-      <a href="/aliases"{% if nav_active == "Aliases" %} aria-current="page"{% endif %}>Aliases</a>
-      <a href="/forwarding"{% if nav_active == "Forwarding" %} aria-current="page"{% endif %}>Forwarding</a>
-      <a href="/relays"{% if nav_active == "Relays" %} aria-current="page"{% endif %}>Relays</a>
-    </div>
-    <div class="nav-group">
-      <span class="nav-group-label">Processing</span>
-      <a href="/queue"{% if nav_active == "Queue" %} aria-current="page"{% endif %}>Queue</a>
-      <a href="/tracking"{% if nav_active == "Tracking" %} aria-current="page"{% endif %}>Tracking</a>
-      <a href="/unsubscribe/list"{% if nav_active == "Unsubscribe" %} aria-current="page"{% endif %}>Unsubscribe</a>
-      <a href="/footer"{% if nav_active == "Footer" %} aria-current="page"{% endif %}>Footer</a>
-      <a href="/rate-limits"{% if nav_active == "Rate Limits" %} aria-current="page"{% endif %}>Rate Limits</a>
-      <a href="/spambl"{% if nav_active == "Spambl" %} aria-current="page"{% endif %}>Spambl</a>
-      <a href="/dmarc"{% if nav_active == "DMARC" %} aria-current="page"{% endif %}>DMARC</a>
-      <a href="/abuse"{% if nav_active == "Abuse" %} aria-current="page"{% endif %}>Abuse</a>
-      <a href="/bounce"{% if nav_active == "Bounces" %} aria-current="page"{% endif %}>Bounces</a>
-      <a href="/fail2ban"{% if nav_active == "Fail2ban" %} aria-current="page"{% endif %}>Fail2ban</a>
-    </div>
-    <div class="nav-group">
-      <span class="nav-group-label">Clients</span>
-      <a href="/webmail"{% if nav_active == "Webmail" %} aria-current="page"{% endif %}>Webmail</a>
-      <a href="/imap-idle"{% if nav_active == "IMAP IDLE" %} aria-current="page"{% endif %}>IMAP IDLE</a>
-      <a href="/caldav"{% if nav_active == "CalDAV" %} aria-current="page"{% endif %}>CalDAV</a>
-      <a href="/carddav"{% if nav_active == "CardDAV" %} aria-current="page"{% endif %}>CardDAV</a>
-      <a href="/webdav"{% if nav_active == "WebDAV" %} aria-current="page"{% endif %}>WebDAV</a>
-    </div>
-    <div class="nav-group">
-      <span class="nav-group-label">Integration</span>
-      <a href="/api"{% if nav_active == "API" %} aria-current="page"{% endif %}>API</a>
-      <a href="/webhooks"{% if nav_active == "Webhooks" %} aria-current="page"{% endif %}>Webhooks</a>
-      <a href="/mcp"{% if nav_active == "MCP" %} aria-current="page"{% endif %}>MCP</a>
-    </div>
-    <div class="nav-group">
-      <span class="nav-group-label">System</span>
-      <a href="/invite-codes"{% if nav_active == "Invite Codes" %} aria-current="page"{% endif %}>Invite Codes</a>
-      <a href="/replicas"{% if nav_active == "Replication" %} aria-current="page"{% endif %}>Replication</a>
-      <a href="/configs"{% if nav_active == "Configs" %} aria-current="page"{% endif %}>Configs</a>
-      <a href="/settings"{% if nav_active == "Settings" %} aria-current="page"{% endif %}>Settings</a>
-    </div>
-  </nav>
-</header>
+<div class="nav">
+<strong>mailserver</strong>
+<a href="/"{% if nav_active == "Dashboard" %} aria-current="page"{% endif %}>dashboard</a>
+<a href="/domains"{% if nav_active == "Domains" %} aria-current="page"{% endif %}>domains</a>
+<a href="/accounts"{% if nav_active == "Accounts" %} aria-current="page"{% endif %}>accounts</a>
+<a href="/aliases"{% if nav_active == "Aliases" %} aria-current="page"{% endif %}>aliases</a>
+<a href="/forwarding"{% if nav_active == "Forwarding" %} aria-current="page"{% endif %}>forwarding</a>
+<a href="/relays"{% if nav_active == "Relays" %} aria-current="page"{% endif %}>relays</a>
+<a href="/queue"{% if nav_active == "Queue" %} aria-current="page"{% endif %}>queue</a>
+<a href="/tracking"{% if nav_active == "Tracking" %} aria-current="page"{% endif %}>tracking</a>
+<a href="/footer"{% if nav_active == "Footer" %} aria-current="page"{% endif %}>footer</a>
+<a href="/rate-limits"{% if nav_active == "Rate Limits" %} aria-current="page"{% endif %}>rate-limits</a>
+<a href="/spambl"{% if nav_active == "Spambl" %} aria-current="page"{% endif %}>spambl</a>
+<a href="/dmarc"{% if nav_active == "DMARC" %} aria-current="page"{% endif %}>dmarc</a>
+<a href="/abuse"{% if nav_active == "Abuse" %} aria-current="page"{% endif %}>abuse</a>
+<a href="/bounce"{% if nav_active == "Bounces" %} aria-current="page"{% endif %}>bounces</a>
+<a href="/fail2ban"{% if nav_active == "Fail2ban" %} aria-current="page"{% endif %}>fail2ban</a>
+<a href="/webmail"{% if nav_active == "Webmail" %} aria-current="page"{% endif %}>webmail</a>
+<a href="/imap-idle"{% if nav_active == "IMAP IDLE" %} aria-current="page"{% endif %}>imap-idle</a>
+<a href="/caldav"{% if nav_active == "CalDAV" %} aria-current="page"{% endif %}>caldav</a>
+<a href="/carddav"{% if nav_active == "CardDAV" %} aria-current="page"{% endif %}>carddav</a>
+<a href="/webdav"{% if nav_active == "WebDAV" %} aria-current="page"{% endif %}>webdav</a>
+<a href="/api"{% if nav_active == "API" %} aria-current="page"{% endif %}>api</a>
+<a href="/webhooks"{% if nav_active == "Webhooks" %} aria-current="page"{% endif %}>webhooks</a>
+<a href="/mcp"{% if nav_active == "MCP" %} aria-current="page"{% endif %}>mcp</a>
+<a href="/invite-codes"{% if nav_active == "Invite Codes" %} aria-current="page"{% endif %}>invite-codes</a>
+<a href="/configs"{% if nav_active == "Configs" %} aria-current="page"{% endif %}>configs</a>
+<a href="/settings"{% if nav_active == "Settings" %} aria-current="page"{% endif %}>settings</a>
+</div>
+<hr>
 {% endif %}
-<div class="page-wrapper">
 <main>
-{% if let Some(msg) = flash %}<output>{{ msg }}</output>{% endif %}
+{% if let Some(msg) = flash %}<p><strong>{{ msg }}</strong></p>{% endif %}
 {% block content %}{% endblock %}
 </main>
-<footer><small>Mailserver Admin</small></footer>
-</div>
+{% if nav_active != "" %}
+<footer>mailserver admin &mdash; <a href="/logout">logout</a></footer>
+{% endif %}
 {% if nav_active != "" %}
 <script>
 (function () {
@@ -114,7 +111,7 @@
       sorted.forEach(function (row) { tbody.appendChild(row); });
       sortable.forEach(function (th, i) {
         var s = th.querySelector(".sort-indicator"); if (s) s.remove();
-        if (i === col) { var span = document.createElement("span"); span.className = "sort-indicator"; span.textContent = dir === "asc" ? " ▲" : " ▼"; th.appendChild(span); }
+        if (i === col) { var span = document.createElement("span"); span.className = "sort-indicator"; span.textContent = dir === "asc" ? " \u25b2" : " \u25bc"; th.appendChild(span); }
       });
     }
     sortable.forEach(function (th, i) {

@@ -8,7 +8,7 @@ use axum::{
 use log::{info, warn};
 use serde::Deserialize;
 
-use crate::web::fire_webhook;
+use crate::web::fire_webhook_with_db;
 use crate::web::AppState;
 
 // ── Forms ──

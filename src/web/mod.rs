@@ -448,5 +448,5 @@ pub(crate) fn fire_webhook_with_db(db: &crate::db::Database, event: &str, detail
     } else {
         warn!("[webhook] {} failed (status={}, error={}) in {}ms", event, response_status, error, duration_ms);
     }
-    db.log_webhook(&webhook_url, &request_body, response_status, &response_body, &error, duration_ms, &event, "");
+    db.log_webhook(&webhook_url, &request_body, Some(response_status), &response_body, &error, duration_ms as i64, &event, "");
 }

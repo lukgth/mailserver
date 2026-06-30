@@ -25,5 +25,19 @@
 <p><mark data-variant="danger">{{ message }}</mark></p>
 {% endif %}
 </main>
+<script>
+(function(){
+  var m = document.cookie.match(/csrf_token=([^;]+)/);
+  if (!m) return;
+  var token = m[1];
+  document.querySelectorAll('form[method=post]').forEach(function(f){
+    if (!f.querySelector('input[name=_csrf_token]')) {
+      var h = document.createElement('input');
+      h.type = 'hidden'; h.name = '_csrf_token'; h.value = token;
+      f.appendChild(h);
+    }
+  });
+})();
+</script>
 </body>
 </html>

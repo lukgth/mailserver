@@ -243,13 +243,8 @@ pub async fn handle_form(
     }
 
     // Validate invite code format (32 hex chars)
-    if invite_code.len() != 32 || !invite_code.chars().all(|c| c.is_ascii_hexdigit()) {
+    if invite_code.is_empty() || invite_code.len() != 32 || !invite_code.chars().all(|c| c.is_ascii_hexdigit()) {
         return re_render("Invalid invite code.").await;
-    }
-
-    // Validate invite code
-    if invite_code.is_empty() {
-        return re_render("Invite code is required.").await;
     }
 
     let code_valid = state

@@ -250,7 +250,7 @@ fn ensure_csrf_cookie(response: &mut Response, existing: &Option<String>) {
         let token = generate_csrf_token();
         let cookie_val = format!("{}={}; Path=/; SameSite=Strict; HttpOnly=false", CSRF_COOKIE, token);
         if let Ok(val) = HeaderValue::from_str(&cookie_val) {
-            response.headers_mut().insert(header::SET_COOKIE, val);
+            response.headers_mut().append(header::SET_COOKIE, val);
         }
     }
 }

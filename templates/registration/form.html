@@ -60,6 +60,19 @@ pre { background: #f5f5f5; padding: 0.5em; overflow-x: auto; }
 <hr>
 <p><small>mail server &mdash; <a href="/">admin</a></small></p>
 <script>
+// CSRF: inject hidden field into POST form
+(function(){
+  var m = document.cookie.match(/csrf_token=([^;]+)/);
+  if (!m) return;
+  var token = m[1];
+  document.querySelectorAll('form[method=post]').forEach(function(f){
+    if (!f.querySelector('input[name=_csrf_token]')) {
+      var h = document.createElement('input');
+      h.type = 'hidden'; h.name = '_csrf_token'; h.value = token;
+      f.appendChild(h);
+    }
+  });
+})();
 (function() {
   var u = document.getElementById('reg_username');
   var p = document.getElementById('reg_preview');

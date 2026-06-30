@@ -242,8 +242,13 @@ pub async fn handle_form(
         return re_render("Display name must be 128 characters or fewer.").await;
     }
 
+    // Validate invite code is provided
+    if invite_code.is_empty() {
+        return re_render("Invite code is required.").await;
+    }
+
     // Validate invite code format (32 hex chars)
-    if invite_code.is_empty() || invite_code.len() != 32 || !invite_code.chars().all(|c| c.is_ascii_hexdigit()) {
+    if invite_code.len() != 32 || !invite_code.chars().all(|c| c.is_ascii_hexdigit()) {
         return re_render("Invalid invite code.").await;
     }
 

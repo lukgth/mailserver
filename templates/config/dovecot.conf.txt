@@ -129,7 +129,7 @@ namespace inbox {
 plugin {
   quota = maildir:UserQuota
   quota_rule = *:storage=1024M
-  quota_rule2 = Junk:storage=50M
+  quota_rule2 = Junk:storage=+50M
   quota_status_success = DUNNO
   quota_status_nouser = REJECT User unknown
   quota_status_overquota = REJECT Mailbox full

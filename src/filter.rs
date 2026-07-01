@@ -831,7 +831,11 @@ fn extract_sender_ip(email: &str) -> Option<String> {
 /// Check if an IPv4 address is listed in a DNS-based RBL (Real-time Blackhole List).
 /// Performs a DNS A-record lookup for `<reversed-ip>.<rbl_host>`.
 /// Returns `true` if the lookup succeeds (IP is listed).
-fn check_rbl(ip: &str, rbl_host: &str) -> bool {
+///
+/// This is the synchronous variant used by tests and by the timed wrapper.
+/// It blocks the calling thread on the DNS resolution, which is acceptable
+/// in tests but risky in production if the DNS server is slow or unreachable.
+pub(crate) fn check_rbl_sync(ip: &str, rbl_host: &str) -> bool {
     let parts: Vec<&str> = ip.split('.').collect();
     if parts.len() != 4 {
         return false;
@@ -844,6 +848,22 @@ fn check_rbl(ip: &str, rbl_host: &str) -> bool {
     (lookup.as_str(), 0u16)
         .to_socket_addrs()
         .map(|mut addrs| addrs.next().is_some())
+        .unwrap_or(false)
+}
+
+/// Check if an IPv4 address is listed in a DNS-based RBL, with a hard
+/// 5-second timeout. If the DNS server is unreachable or slow, returns
+/// `false` (not listed) rather than blocking the mail flow indefinitely.
+///
+/// This is the production variant used by the content filter.
+fn check_rbl(ip: &str, rbl_host: &str) -> bool {
+    let ip = ip.to_string();
+    let host = rbl_host.to_string();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(check_rbl_sync(&ip, &host));
+    });
+    rx.recv_timeout(std::time::Duration::from_secs(5))
         .unwrap_or(false)
 }
 
@@ -1202,8 +1222,27 @@ mod tests {
 
     #[test]
     fn check_rbl_returns_false_for_invalid_ip() {
-        assert!(!check_rbl("not-an-ip", "zen.spamhaus.org"));
-        assert!(!check_rbl("1.2.3", "zen.spamhaus.org"));
+        assert!(!check_rbl_sync("not-an-ip", "zen.spamhaus.org"));
+        assert!(!check_rbl_sync("1.2.3", "zen.spamhaus.org"));
+    }
+
+    #[test]
+    fn check_rbl_timeout_returns_false() {
+        // .invalid is a guaranteed-to-fail TLD (RFC 2606). The DNS lookup
+        // will time out; the wrapper must return false within 6 seconds.
+        let start = std::time::Instant::now();
+        let result = check_rbl("1.0.0.1", "dns.timeout.invalid");
+        let elapsed = start.elapsed();
+        assert!(
+            !result,
+            "check_rbl must return false on timeout, got {}",
+            result
+        );
+        assert!(
+            elapsed.as_secs() < 6,
+            "check_rbl must not block longer than 6 s on timeout, took {} s",
+            elapsed.as_secs()
+        );
     }
 
     #[test]

@@ -56,8 +56,8 @@ trap 'trap - TERM; kill 0' SIGTERM SIGINT SIGQUIT
 # tee duplicates output to /var/log/mail.log for fail2ban monitoring
 touch /var/log/mail.log
 
-dovecot -F -P /var/run/dovecot.pid 2>&1 | tee -a /var/log/mail.log &
-DOVECOT_PID=$(cat /var/run/dovecot.pid 2>/dev/null || echo $!)
+dovecot -F 2>&1 | tee -a /var/log/mail.log &
+DOVECOT_PID=$!
 opendkim -f -P /var/run/opendkim/opendkim.pid &
 OPENDKIM_PID=$!
 /usr/local/bin/mailserver serve &

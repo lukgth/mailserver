@@ -129,11 +129,6 @@ pub fn auth_routes() -> Router<AppState> {
         .route("/settings/mail", post(settings::update_mail_settings))
         .route("/settings/tls/regenerate", post(settings::regenerate_tls))
         .route("/settings/tls/cert.pem", get(settings::download_cert))
-        .route("/settings/tls/key.pem", get(settings::download_key))
-        .route(
-            "/settings/restart-services",
-            post(settings::restart_services),
-        )
         .route(
             "/settings/restart-container",
             post(settings::restart_container),

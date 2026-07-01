@@ -595,49 +595,6 @@ pub async fn download_cert(auth: AuthAdmin) -> Response {
     }
 }
 
-pub async fn restart_services(auth: AuthAdmin) -> Response {
-    info!(
-        "[web] POST /settings/restart-services — restarting mail services by username={}",
-        auth.admin.username
-    );
-
-    match crate::config::restart_services() {
-        Ok(details) => {
-            info!(
-                "[web] services restarted successfully by username={}: {}",
-                auth.admin.username, details
-            );
-            let tmpl = ErrorTemplate {
-                nav_active: "Settings",
-                flash: None,
-                status_code: 200,
-                status_text: "OK",
-                title: "Success",
-                message: &format!("Mail services restarted. {}", details),
-                back_url: "/settings",
-                back_label: "Back to Settings",
-            };
-            Html(tmpl.render().unwrap()).into_response()
-        }
-        Err(e) => {
-            error!(
-                "[web] failed to restart services by username={}: {}",
-                auth.admin.username, e
-            );
-            let tmpl = ErrorTemplate {
-                nav_active: "Settings",
-                flash: None,
-                status_code: 500,
-                status_text: "Error",
-                title: "Error",
-                message: &format!("Failed to restart services: {}", e),
-                back_url: "/settings",
-                back_label: "Back to Settings",
-            };
-            Html(tmpl.render().unwrap()).into_response()
-        }
-    }
-}
 
 pub async fn restart_container(auth: AuthAdmin) -> Response {
     info!(
@@ -683,43 +640,3 @@ pub async fn restart_container(auth: AuthAdmin) -> Response {
     }
 }
 
-pub async fn download_key(auth: AuthAdmin) -> Response {
-    debug!(
-        "[web] GET /settings/tls/key.pem — private key download by username={}",
-        auth.admin.username
-    );
-    let key_path = "/data/ssl/key.pem";
-    match std::fs::read(key_path) {
-        Ok(data) => {
-            info!(
-                "[web] private key downloaded by username={}",
-                auth.admin.username
-            );
-            (
-                [
-                    (header::CONTENT_TYPE, "application/x-pem-file"),
-                    (
-                        header::CONTENT_DISPOSITION,
-                        "attachment; filename=\"key.pem\"",
-                    ),
-                ],
-                data,
-            )
-                .into_response()
-        }
-        Err(e) => {
-            error!("[web] failed to read private key file: {}", e);
-            let tmpl = ErrorTemplate {
-                nav_active: "Settings",
-                flash: None,
-                status_code: 404,
-                status_text: "Not Found",
-                title: "Error",
-                message: "Private key file not found.",
-                back_url: "/settings",
-                back_label: "Back to Settings",
-            };
-            Html(tmpl.render().unwrap()).into_response()
-        }
-    }
-}

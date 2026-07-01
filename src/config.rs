@@ -1143,7 +1143,7 @@ pub fn reload_services() {
     if Path::new("/etc/postfix/main.cf").exists() {
         if Path::new("/var/spool/postfix/pid/master.pid").exists() {
             match Command::new("postfix").arg("reload").output() {
-                Ok(output) if output.status.success() => info!("[config] postfix reloaded successfully"),
+                Ok(output) if output.status.success() => info!("[config] reload postfix ok"),
                 Ok(output) => warn!(
                     "[config] postfix reload exited with status {}: {}",
                     output.status,
@@ -1160,7 +1160,7 @@ pub fn reload_services() {
 
     if Path::new("/run/dovecot/master.pid").exists() {
         match Command::new("dovecot").arg("reload").output() {
-            Ok(output) if output.status.success() => info!("[config] dovecot reloaded successfully"),
+            Ok(output) if output.status.success() => info!("[config] reload dovecot ok"),
             Ok(output) => warn!(
                 "[config] dovecot reload exited with status {}: {}",
                 output.status,
@@ -1172,59 +1172,37 @@ pub fn reload_services() {
         info!("[config] skipping dovecot reload: Dovecot is not running");
     }
 
-    // Signal opendkim to reload via USR1
-    match Command::new("pgrep").arg("opendkim").output() {
-        Ok(output) => {
-            let pids = String::from_utf8_lossy(&output.stdout);
-            for pid in pids.split_whitespace() {
-                match Command::new("kill").args(["-USR1", pid]).output() {
-                    Ok(_) => debug!("[config] sent USR1 to opendkim pid={}", pid),
-                    Err(e) => warn!("[config] failed to signal opendkim pid={}: {}", pid, e),
+    // Signal opendkim to reload via USR1. Try the PID file first (no fork
+    // overhead), then fall back to `pgrep -x` (exact basename match).
+    let opendkim_pid = std::fs::read_to_string("/var/run/opendkim/opendkim.pid")
+        .ok()
+        .and_then(|s| s.trim().to_string().parse::<i32>().ok());
+    if let Some(pid) = opendkim_pid {
+        match Command::new("kill").args(["-USR1", &pid.to_string()]).output() {
+            Ok(_) => debug!("[config] sent USR1 to opendkim pid={} (from pidfile)", pid),
+            Err(e) => warn!("[config] failed to signal opendkim pid={}: {}", pid, e),
+        }
+    } else {
+        match Command::new("pgrep").args(["-x", "opendkim"]).output() {
+            Ok(output) => {
+                let pids = String::from_utf8_lossy(&output.stdout);
+                for pid in pids.split_whitespace() {
+                    match Command::new("kill").args(["-USR1", pid]).output() {
+                        Ok(_) => debug!("[config] sent USR1 to opendkim pid={}", pid),
+                        Err(e) => warn!("[config] failed to signal opendkim pid={}: {}", pid, e),
+                    }
+                }
+                if pids.trim().is_empty() {
+                    debug!("[config] no opendkim process found to signal");
                 }
             }
-            if pids.trim().is_empty() {
-                debug!("[config] no opendkim process found to signal");
-            }
+            Err(e) => warn!("[config] failed to find opendkim process: {}", e),
         }
-        Err(e) => warn!("[config] failed to find opendkim process: {}", e),
     }
 
     info!("[config] service reload complete");
 }
 
-pub fn restart_services() -> Result<String, String> {
-    info!("[config] restarting all mail services via supervisorctl");
-
-    let programs = ["postfix", "dovecot", "opendkim"];
-    let mut results = Vec::new();
-
-    for program in &programs {
-        match Command::new("supervisorctl")
-            .args(["restart", program])
-            .output()
-        {
-            Ok(output) if output.status.success() => {
-                info!("[config] {} restarted successfully", program);
-                results.push(format!("{}: restarted", program));
-            }
-            Ok(output) => {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                warn!(
-                    "[config] supervisorctl restart {} exited with status {}: {}",
-                    program, output.status, stderr
-                );
-                results.push(format!("{}: failed ({})", program, stderr.trim()));
-            }
-            Err(e) => {
-                warn!("[config] failed to restart {}: {}", program, e);
-                results.push(format!("{}: error ({})", program, e));
-            }
-        }
-    }
-
-    info!("[config] service restart complete");
-    Ok(results.join("; "))
-}
 
 pub fn restart_container() -> Result<(), String> {
     info!("[config] restarting Docker container via socket");

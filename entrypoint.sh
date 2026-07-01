@@ -62,8 +62,15 @@ opendkim -f -P /var/run/opendkim/opendkim.pid &
 OPENDKIM_PID=$!
 /usr/local/bin/mailserver serve &
 MAILSERVER_PID=$!
-postfix start-fg 2>&1 | tee -a /var/log/mail.log &
-POSTFIX_PID=$(cat /var/spool/postfix/pid/master.pid 2>/dev/null || echo $!)
+postfix start 2>&1 | tee -a /var/log/mail.log &
+# postfix start is async; wait for the master PID file to appear
+for i in 1 2 3 4 5; do
+  if [ -f /var/spool/postfix/pid/master.pid ]; then
+    break
+  fi
+  sleep 1
+done
+POSTFIX_PID=$(cat /var/spool/postfix/pid/master.pid 2>/dev/null || echo 0)
 
 # Monitor all services — exit if any process dies
 while true; do

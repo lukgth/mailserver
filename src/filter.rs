@@ -428,9 +428,86 @@ fn extract_header(email: &str, header_name: &str) -> Option<String> {
     None
 }
 
+/// Return `true` iff `s` is safe to splice raw into a `MAIL FROM:<…>` or
+/// `RCPT TO:<…>` SMTP command without first SMTP-escaping it.
+///
+/// SMTP command arguments are terminated by `<CRLF>`; a `sender` or
+/// `recipient` containing `\r` or `\n` lets an attacker inject arbitrary
+/// SMTP commands (e.g. a second `MAIL FROM`, an `RCPT TO` that overrides
+/// the message envelope, a `DATA` payload with malicious headers, or a
+/// `QUIT` that aborts the conversation early).  The downstream Postfix
+/// reinject listener trusts the envelope it is given, so the only safe
+/// place to enforce this is here, at the source.
+///
+/// The check is deliberately strict: printable ASCII only, exactly one
+/// `@`, non-empty local and domain parts, and a domain containing at
+/// least one `.` (so `a@b` and `@b` are rejected even though they parse
+/// as a valid envelope syntactically).  Every email address produced by
+/// `db.list_all_accounts_with_domain` and `db.list_all_aliases_with_domain`
+/// already satisfies this grammar.
+fn is_safe_smtp_addr(s: &str) -> bool {
+    let bytes = s.as_bytes();
+    if bytes.iter().any(|&b| {
+        b == b'\r' || b == b'\n' || b == 0 || b < 0x20 || b == 0x7f
+    }) {
+        return false;
+    }
+    let mut parts = s.splitn(3, '@');
+    let local = parts.next().unwrap_or("");
+    let domain = parts.next().unwrap_or("");
+    if local.is_empty() || domain.is_empty() || parts.next().is_some() {
+        return false;
+    }
+    if !domain.contains('.') {
+        return false;
+    }
+    // Disallow consecutive dots and leading/trailing dots in either part.
+    if local.starts_with('.') || local.ends_with('.') || local.contains("..") {
+        return false;
+    }
+    if domain.starts_with('.') || domain.ends_with('.') || domain.contains("..") {
+        return false;
+    }
+    true
+}
+
 fn reinject_smtp(email: &str, sender: &str, recipients: &[String]) -> io::Result<()> {
     use std::io::{BufReader, Write};
     use std::net::TcpStream;
+
+    // Guard the envelope before opening the SMTP session.  An attacker who
+    // controls the `sender` or any `rcpt` could otherwise inject CRLF
+    // sequences and run arbitrary SMTP commands against the reinject
+    // listener.  The downstream Postfix trusts the envelope we hand it,
+    // so the only safe place to enforce this is here, at the source.
+    if !is_safe_smtp_addr(sender) {
+        warn!(
+            "[filter] rejected unsafe envelope address: sender={:?} rcpt={:?}",
+            sender, recipients
+        );
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "rejecting unsafe envelope sender address: {:?}",
+                sender
+            ),
+        ));
+    }
+    for rcpt in recipients {
+        if !is_safe_smtp_addr(rcpt) {
+            warn!(
+                "[filter] rejected unsafe envelope address: sender={:?} rcpt={:?}",
+                sender, recipients
+            );
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "rejecting unsafe envelope recipient address: {:?}",
+                    rcpt
+                ),
+            ));
+        }
+    }
 
     debug!("[filter] connecting to 127.0.0.1:10025 for reinjection");
     let stream = TcpStream::connect("127.0.0.1:10025")?;
@@ -1262,4 +1339,56 @@ mod tests {
         assert_eq!(meta.date, "Mon, 01 Jan 2024 00:00:00 +0000");
         assert_eq!(meta.message_id, "<hello@remote.com>");
     }
+
+    // ── is_safe_smtp_addr tests ──
+
+    #[test]
+    fn is_safe_smtp_addr_accepts_valid_address() {
+        assert!(is_safe_smtp_addr("a@b.c"));
+        assert!(is_safe_smtp_addr("user@example.com"));
+        assert!(is_safe_smtp_addr("a.b@c.d"));
+        assert!(is_safe_smtp_addr("a+b@c.d"));
+    }
+
+    #[test]
+    fn is_safe_smtp_addr_rejects_crlf() {
+        assert!(!is_safe_smtp_addr("a\r\n@b"));
+        assert!(!is_safe_smtp_addr("a\r@b.c"));
+        assert!(!is_safe_smtp_addr("a\n@b.c"));
+    }
+
+    #[test]
+    fn is_safe_smtp_addr_rejects_no_dot_in_domain() {
+        assert!(!is_safe_smtp_addr("a@b"));
+    }
+
+    #[test]
+    fn is_safe_smtp_addr_rejects_empty_parts() {
+        assert!(!is_safe_smtp_addr(""));
+        assert!(!is_safe_smtp_addr("@b.c"));
+        assert!(!is_safe_smtp_addr("a@"));
+    }
+
+    #[test]
+    fn is_safe_smtp_addr_rejects_multiple_ats() {
+        assert!(!is_safe_smtp_addr("a@b@c.d"));
+    }
+
+    #[test]
+    fn is_safe_smtp_addr_rejects_control_chars() {
+        assert!(!is_safe_smtp_addr("a\x00@b.c"));
+        assert!(!is_safe_smtp_addr("a\x1f@b.c"));
+        assert!(!is_safe_smtp_addr("a\x7f@b.c"));
+    }
+
+    #[test]
+    fn is_safe_smtp_addr_rejects_dot_issues() {
+        assert!(!is_safe_smtp_addr(".a@b.c"));
+        assert!(!is_safe_smtp_addr("a.@b.c"));
+        assert!(!is_safe_smtp_addr("a..b@c.d"));
+        assert!(!is_safe_smtp_addr("a@.b.c"));
+        assert!(!is_safe_smtp_addr("a@b.c."));
+        assert!(!is_safe_smtp_addr("a@b..c"));
+    }
 }
+

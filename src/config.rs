@@ -207,25 +207,181 @@ fn write_secure_file(path: &str, content: &str) -> std::io::Result<()> {
     fs::write(path, content)
 }
 
+/// Write a Postfix lookup map (virtual_aliases, transport_maps, sender_login_maps,
+/// recipient_bcc) with mode 0o640 and group ownership `root:postfix`. The
+/// chown is best-effort: if the `postfix` group does not exist on the host
+/// (e.g. a non-Debian image), we fall back to 0o644 so Postfix can still read
+/// the file and the world only sees non-secret rewrite rules. We never fail
+/// the boot because of a missing group — Postfix correctly handling mail is
+/// strictly more important than hardening the file mode.
+#[cfg(unix)]
+pub(crate) fn write_postfix_map(path: &str, content: &str) -> std::io::Result<()> {
+    use std::fs::OpenOptions;
+    use std::os::unix::fs::OpenOptionsExt;
+    use std::os::unix::fs::PermissionsExt;
+
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o640)
+        .open(path)?;
+    file.write_all(content.as_bytes())?;
+    file.sync_all()?;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o640))?;
+
+    let chown = Command::new("chown").args(["root:postfix", path]).output();
+    match chown {
+        Ok(o) if o.status.success() => {
+            debug!("[config] chown root:postfix {} ok", path);
+        }
+        Ok(o) => {
+            let stderr = String::from_utf8_lossy(&o.stderr);
+            warn!(
+                "[config] chown root:postfix {} failed: {} — falling back to mode 0o644",
+                path, stderr
+            );
+            if let Err(e2) = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o644)) {
+                warn!(
+                    "[config] failed to relax {} to 0o644 after chown failure: {}",
+                    path, e2
+                );
+            }
+        }
+        Err(e) => {
+            warn!(
+                "[config] failed to invoke chown on {}: {} — falling back to mode 0o644",
+                path, e
+            );
+            if let Err(e2) = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o644)) {
+                warn!(
+                    "[config] failed to relax {} to 0o644 after chown error: {}",
+                    path, e2
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Write a Postfix secret map (`sasl_passwd`) with mode 0o640. The chown is
+/// best-effort with the same fallback policy as `write_postfix_map` — but we
+/// relax to 0o640 (not 0o644) even on chown failure so plaintext relay
+/// credentials are never world-readable.
+#[cfg(unix)]
+pub(crate) fn write_postfix_secret(path: &str, content: &str) -> std::io::Result<()> {
+    use std::fs::OpenOptions;
+    use std::os::unix::fs::OpenOptionsExt;
+    use std::os::unix::fs::PermissionsExt;
+
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o640)
+        .open(path)?;
+    file.write_all(content.as_bytes())?;
+    file.sync_all()?;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o640))?;
+
+    let chown = Command::new("chown").args(["root:postfix", path]).output();
+    match chown {
+        Ok(o) if o.status.success() => {
+            debug!("[config] chown root:postfix {} ok", path);
+        }
+        Ok(o) => {
+            let stderr = String::from_utf8_lossy(&o.stderr);
+            warn!(
+                "[config] chown root:postfix {} failed: {} — keeping mode 0o640; verify Postfix can read",
+                path, stderr
+            );
+        }
+        Err(e) => {
+            warn!(
+                "[config] failed to invoke chown on {}: {} — keeping mode 0o640",
+                path, e
+            );
+        }
+    }
+    Ok(())
+}
+
+
 #[cfg(unix)]
 fn set_dovecot_passwd_permissions(path: &str) -> std::io::Result<()> {
     use std::fs::Permissions;
     use std::os::unix::fs::PermissionsExt;
 
+    // Always set 0o640 first so the file is at most group-readable even before chown runs.
     std::fs::set_permissions(path, Permissions::from_mode(0o640))?;
+
+    // Run the chown unconditionally. The chown is a hardening nicety; dovecot
+    // (or any local-delivery agent) running as root can still read 0o640 even
+    // when the chown fails, so the absence of the `dovecot` group on the host
+    // must not break delivery.
     let output = Command::new("chown")
         .args(["root:dovecot", path])
-        .output()?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(std::io::Error::other(format!(
-            "chown root:dovecot {} failed with status {}: {}",
-            path, output.status, stderr
-        )));
+        .output();
+    match output {
+        Ok(o) if o.status.success() => Ok(()),
+        Ok(o) => {
+            let stderr = String::from_utf8_lossy(&o.stderr);
+            warn!(
+                "[config] chown root:dovecot {} failed: {} — keeping file at 0o640, root-readable only",
+                path, stderr
+            );
+            Ok(())
+        }
+        Err(e) => {
+            warn!(
+                "[config] chown root:dovecot {} failed: {} — keeping file at 0o640, root-readable only",
+                path, e
+            );
+            Ok(())
+        }
     }
-
-    Ok(())
 }
+
+/// Combine `write_secure_file` and `set_dovecot_passwd_permissions` into a
+/// single call. Guarantees the file is **never** world-readable: on
+/// chown-success it sits at 0o640 owned by root:dovecot, and on
+/// chown-failure it sits at 0o640 owned by whoever owns the file (still not
+/// world-readable). 0o600 is the absolute floor; the path is never widened
+/// to 0o644.
+#[cfg(unix)]
+pub(crate) fn write_dovecot_passwd(path: &str, content: &str) -> std::io::Result<()> {
+    write_secure_file(path, content)?;
+    set_dovecot_passwd_permissions(path)
+}
+
+/// Non-Unix fallback for `write_dovecot_passwd` — no mode enforcement.
+#[cfg(not(unix))]
+pub(crate) fn write_dovecot_passwd(path: &str, content: &str) -> std::io::Result<()> {
+    warn!(
+        "[config] writing {} without unix-mode enforcement",
+        path
+    );
+    fs::write(path, content)
+}
+
+/// Non-Unix fallback for Postfix lookup maps. On non-Unix platforms (Windows,
+/// etc.) we cannot enforce Unix file modes or group ownership; the file is
+/// written with default permissions. A warning is logged so operators know
+/// the hardening was not applied.
+#[cfg(not(unix))]
+pub(crate) fn write_postfix_map(path: &str, content: &str) -> std::io::Result<()> {
+    warn!("[config] writing {} without unix-mode enforcement", path);
+    fs::write(path, content)
+}
+
+/// Non-Unix fallback for Postfix secret maps. Same caveat as
+/// `write_postfix_map` — no mode enforcement is possible.
+#[cfg(not(unix))]
+pub(crate) fn write_postfix_secret(path: &str, content: &str) -> std::io::Result<()> {
+    warn!("[config] writing {} without unix-mode enforcement", path);
+    fs::write(path, content)
+}
+
 
 pub fn generate_all_configs(db: &Database, hostname: &str) {
     info!(
@@ -246,8 +402,42 @@ pub fn generate_all_configs(db: &Database, hostname: &str) {
     generate_opendkim_conf();
     generate_opendkim_tables(db);
     postmap_files();
+    #[cfg(unix)]
+    assert_postfix_maps_group_readable();
     reload_services();
     info!("[config] all configuration files generated successfully");
+}
+
+/// Verify that the critical Postfix lookup maps are at least group-readable
+/// after writing. Catches the historical bug where maps were created with
+/// mode 0o600 (the helper default) and Postfix could not read them.
+#[cfg(unix)]
+fn assert_postfix_maps_group_readable() {
+    use std::os::unix::fs::PermissionsExt;
+    let critical = [
+        "/etc/postfix/virtual_aliases",
+        "/etc/postfix/transport_maps",
+        "/etc/postfix/sender_login_maps",
+        "/etc/postfix/recipient_bcc",
+    ];
+    for path in &critical {
+        match std::fs::metadata(path) {
+            Ok(meta) => {
+                let mode = meta.permissions().mode() & 0o777;
+                if mode & 0o040 == 0 {
+                    error!(
+                        "[config] {} is group-unreadable (mode={:o}); Postfix will fail alias resolution",
+                        path, mode
+                    );
+                } else {
+                    debug!("[config] {} mode={:o} (group-readable, ok)", path, mode);
+                }
+            }
+            Err(e) => {
+                warn!("[config] could not stat {}: {}", path, e);
+            }
+        }
+    }
 }
 
 pub fn generate_postfix_main_cf(db: &Database, hostname: &str) {
@@ -395,7 +585,7 @@ pub fn generate_virtual_mailboxes(db: &Database) {
         if !a.active {
             continue;
         }
-        if let Some(ref domain) = a.domain_name {
+        if let Some(domain) = &a.domain_name {
             let _ = writeln!(
                 lines,
                 "{}@{} {}/{}/Maildir/",
@@ -518,9 +708,9 @@ pub fn generate_virtual_aliases(db: &Database) {
         );
     }
 
-    match write_secure_file("/etc/postfix/virtual_aliases", &lines) {
+    match write_postfix_map("/etc/postfix/virtual_aliases", &lines) {
         Ok(_) => debug!(
-            "[config] wrote /etc/postfix/virtual_aliases with secure permissions ({} active entries)",
+            "[config] wrote /etc/postfix/virtual_aliases (mode 0o640, {} active entries)",
             active_count
         ),
         Err(e) => error!(
@@ -559,9 +749,9 @@ pub fn generate_recipient_bcc_maps(db: &Database) {
     for (source, bcc) in &entries {
         let _ = writeln!(lines, "{} {}", source, bcc);
     }
-    match write_secure_file("/etc/postfix/recipient_bcc", &lines) {
+    match write_postfix_map("/etc/postfix/recipient_bcc", &lines) {
         Ok(_) => debug!(
-            "[config] wrote /etc/postfix/recipient_bcc with secure permissions ({} entries)",
+            "[config] wrote /etc/postfix/recipient_bcc (mode 0o640, {} entries)",
             entries.len()
         ),
         Err(e) => error!("[config] failed to write /etc/postfix/recipient_bcc: {}", e),
@@ -659,9 +849,9 @@ pub fn generate_sender_login_maps(db: &Database) {
                 .join(",")
         );
     }
-    match write_secure_file("/etc/postfix/sender_login_maps", &lines) {
+    match write_postfix_map("/etc/postfix/sender_login_maps", &lines) {
         Ok(_) => debug!(
-            "[config] wrote /etc/postfix/sender_login_maps with secure permissions ({} entries)",
+            "[config] wrote /etc/postfix/sender_login_maps (mode 0o640, {} entries)",
             map.len()
         ),
         Err(e) => error!(
@@ -684,9 +874,9 @@ pub fn generate_transport_maps(db: &Database) {
         );
     }
 
-    match write_secure_file("/etc/postfix/transport_maps", &lines) {
+    match write_postfix_map("/etc/postfix/transport_maps", &lines) {
         Ok(_) => debug!(
-            "[config] wrote /etc/postfix/transport_maps with secure permissions ({} entries)",
+            "[config] wrote /etc/postfix/transport_maps (mode 0o640, {} entries)",
             assignments.len()
         ),
         Err(e) => error!(
@@ -721,9 +911,9 @@ pub fn generate_sasl_passwd(db: &Database) {
         let _ = writeln!(lines, "{} {}", host_port, creds);
     }
 
-    match write_secure_file(sasl_path, &lines) {
+    match write_postfix_secret(sasl_path, &lines) {
         Ok(_) => debug!(
-            "[config] wrote {} with secure permissions ({} relay credentials)",
+            "[config] wrote {} (mode 0o640, {} relay credentials)",
             sasl_path,
             relay_creds.len()
         ),
@@ -802,7 +992,7 @@ pub fn generate_dovecot_passwd(db: &Database) {
         if !a.active {
             continue;
         }
-        if let Some(ref domain) = a.domain_name {
+        if let Some(domain) = &a.domain_name {
             let _ = writeln!(
                 lines,
                 "{}@{}:{{BLF-CRYPT}}{}:::::",
@@ -810,32 +1000,11 @@ pub fn generate_dovecot_passwd(db: &Database) {
             );
         }
     }
-    match write_secure_file(passwd_path, &lines) {
-        Ok(_) => {
-            #[cfg(unix)]
-            if let Err(e) = set_dovecot_passwd_permissions(passwd_path) {
-                use std::fs::Permissions;
-                use std::os::unix::fs::PermissionsExt;
-
-                warn!(
-                    "[config] failed to set /etc/dovecot/passwd ownership/permissions ({}), falling back to mode 0644",
-                    e
-                );
-                if let Err(e2) =
-                    std::fs::set_permissions(passwd_path, Permissions::from_mode(0o644))
-                {
-                    error!(
-                        "[config] failed to apply fallback permissions for /etc/dovecot/passwd: {}",
-                        e2
-                    );
-                    return;
-                }
-            }
-            debug!(
-                "[config] wrote /etc/dovecot/passwd with secure permissions ({} accounts)",
-                accounts.len()
-            )
-        }
+    match write_dovecot_passwd(passwd_path, &lines) {
+        Ok(()) => debug!(
+            "[config] wrote /etc/dovecot/passwd (mode 0o640, {} accounts)",
+            accounts.len()
+        ),
         Err(e) => error!("[config] failed to write /etc/dovecot/passwd: {}", e),
     }
 }

@@ -13,12 +13,29 @@ use russh::keys::{PrivateKey, PrivateKeyWithHashAlg};
 use russh::ChannelMsg;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::future::Future;
 
+
+// ── Result type for remote exec ───────────────────────────────────────────────
+
+/// Result of a remote command: (stdout, stderr, exit_code).
+#[derive(Debug, Clone)]
+pub(crate) struct CmdResult {
+    pub(crate) stdout: String,
+    pub(crate) stderr: String,
+    pub(crate) exit_code: i32,
+}
+
+impl CmdResult {
+    pub(crate) fn success(&self) -> bool {
+        self.exit_code == 0
+    }
+}
 // ── SSH Handler ───────────────────────────────────────────────────────────────
 
 /// Minimal russh client handler. Accepts all host keys (users are expected to
 /// verify the host key fingerprint printed to the log before trusting the remote).
-struct SshHandler;
+pub(crate) struct SshHandler;
 
 impl client::Handler for SshHandler {
     type Error = russh::Error;
@@ -33,6 +50,95 @@ impl client::Handler for SshHandler {
         );
         info!("[provision] accepting host key — verify algorithm/fingerprint above if this is your first connection");
         Ok(true)
+    }
+}
+
+// ── Shell escaping helpers ────────────────────────────────────────────────────
+//
+// russh-0.60.2's `Channel::exec(want_reply, command)` only accepts a single
+// byte-string command, so we have to escape arguments ourselves. Every
+// string interpolated into a remote command MUST go through `sh_single_quote`
+// first. Failing to do so allows shell injection (RCE) on the remote.
+//
+// The implementation embeds the input inside a single-quoted POSIX shell
+// string; the only byte that has special meaning inside single quotes is the
+// single quote itself, which we close, escape, and re-open around.
+
+/// Quote a string for safe inclusion in a POSIX shell command line.
+///
+/// The returned value is a single-quoted POSIX string (e.g. `"a'b"` becomes
+/// `"'a'\\''b'"`). Always safe to embed unquoted in a remote command.
+pub(crate) fn sh_single_quote(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('\'');
+    for c in s.chars() {
+        if c == '\'' {
+            out.push_str("'\\''");
+        } else {
+            out.push(c);
+        }
+    }
+    out.push('\'');
+    out
+}
+
+/// Execute a remote command from a program + argv vector. Each argument is
+/// shell-quoted via `sh_single_quote` before being joined, so user-controlled
+/// paths (e.g. `--key`, file paths, script arguments) cannot break out of
+/// their position and inject arbitrary shell.
+///
+/// Note: russh-0.60.2 only exposes `Channel::exec(want_reply, command)` (a
+/// single shell string). We compose the string from a `sh_single_quote`'d
+/// argv. The remote still runs under a shell, but every argument is
+/// pre-quoted so positional `;` / `$()` / `&&` cannot escape.
+pub async fn exec_argv(
+    session: &mut client::Handle<SshHandler>,
+    program: &str,
+    args: &[&str],
+) -> Result<CmdResult, Box<dyn std::error::Error>> {
+    let mut parts: Vec<String> = Vec::with_capacity(args.len() + 1);
+    parts.push(sh_single_quote(program));
+    for a in args {
+        parts.push(sh_single_quote(a));
+    }
+    let cmd = parts.join(" ");
+    exec(session, &cmd).await
+}
+
+#[cfg(test)]
+mod shell_quote_tests {
+    use super::*;
+
+    #[test]
+    fn quotes_plain_ascii() {
+        assert_eq!(sh_single_quote("a"), "'a'");
+        assert_eq!(sh_single_quote("/tmp/path"), "'/tmp/path'");
+    }
+
+    #[test]
+    fn escapes_single_quote() {
+        assert_eq!(sh_single_quote("a'b"), "'a'\\''b'");
+    }
+
+    #[test]
+    fn escapes_injection_attempts() {
+        // The injection attempt is now inside a single-quoted string; the
+        // remote shell cannot interpret it.
+        assert_eq!(sh_single_quote("; rm -rf /"), "'; rm -rf /'");
+        assert_eq!(sh_single_quote("$(id)"), "'$(id)'");
+        assert_eq!(sh_single_quote("`id`"), "'`id`'");
+    }
+
+    #[test]
+    fn preserves_backslashes() {
+        // Backslashes have no special meaning inside single quotes; they are
+        // passed through unchanged.  This is the desired POSIX behaviour.
+        assert_eq!(sh_single_quote(r"C:\Users\alice"), r"'C:\Users\alice'");
+    }
+
+    #[test]
+    fn empty_string_is_a_valid_argument() {
+        assert_eq!(sh_single_quote(""), "''");
     }
 }
 
@@ -255,21 +361,7 @@ fn load_key(path: &Path, password: Option<&str>) -> Result<PrivateKey, Box<dyn s
     // Try unencrypted key
     let kp = russh::keys::load_secret_key(path, None)?;
     Ok(kp)
-}
 
-// ── Remote Execution Helpers ──────────────────────────────────────────────────
-
-/// Result of a remote command: (stdout, stderr, exit_code)
-struct CmdResult {
-    stdout: String,
-    stderr: String,
-    exit_code: i32,
-}
-
-impl CmdResult {
-    fn success(&self) -> bool {
-        self.exit_code == 0
-    }
 }
 
 /// Execute a single command on the remote host and collect stdout/stderr.
@@ -348,7 +440,7 @@ async fn remote_exists(
     session: &mut client::Handle<SshHandler>,
     path: &str,
 ) -> Result<bool, Box<dyn std::error::Error>> {
-    let res = exec(session, &format!("test -e {}", path)).await?;
+    let res = exec_argv(session, "test", &["-e", path]).await?;
     Ok(res.success())
 }
 
@@ -357,11 +449,78 @@ async fn command_exists(
     session: &mut client::Handle<SshHandler>,
     command: &str,
 ) -> Result<bool, Box<dyn std::error::Error>> {
-    let res = exec(session, &format!("command -v {} >/dev/null 2>&1", command)).await?;
+    // `command` is the only attacker-controlled piece; quoting it via
+    // `sh_single_quote` neutralises `;` / `$(...)` / `&&`. The redirect
+    // is appended unquoted because it is a static literal.
+    let cmd = format!(
+        "{} {} >/dev/null 2>&1",
+        sh_single_quote("command"),
+        sh_single_quote(command),
+    );
+    let res = exec(session, &cmd).await?;
     Ok(res.success())
 }
 
 // ── File Upload ───────────────────────────────────────────────────────────────
+
+/// Validate that a remote path consists only of characters safe to embed in a
+/// shell command. The path will be passed through `sh_single_quote` before
+/// being interpolated into a remote `exec` call, but defence-in-depth: we
+/// reject any path containing characters outside this allowlist so a bug in
+/// the quoting layer cannot yield RCE on the remote.
+///
+/// Allowed characters: ASCII letters, digits, dot, underscore, slash, plus,
+/// hyphen. This matches the path grammar used by every legitimate remote
+/// path in this binary (e.g. `/etc/mailserver/env`, `/usr/local/bin/foo.sh`,
+/// `/app/templates/config/x.txt`).
+fn validate_remote_path(path: &str) -> Result<(), String> {
+    if path.is_empty() {
+        return Err("remote path is empty".to_string());
+    }
+    if !path
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'/' | b'+' | b'-'))
+    {
+        return Err(format!(
+            "remote path {:?} contains characters outside the safe allowlist (A-Za-z0-9._/+-)",
+            path
+        ));
+    }
+    if path.contains("..") {
+        return Err(format!("remote path {:?} contains a '..' segment", path));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod remote_path_tests {
+    use super::validate_remote_path;
+
+    #[test]
+    fn accepts_normal_paths() {
+        assert!(validate_remote_path("/etc/mailserver/env").is_ok());
+        assert!(validate_remote_path("/usr/local/bin/mailserver").is_ok());
+        assert!(validate_remote_path("/app/templates/config/postfix-main.cf.txt").is_ok());
+        assert!(validate_remote_path("/data/dkim/example.com.private").is_ok());
+    }
+
+    #[test]
+    fn rejects_injection_attempts() {
+        assert!(validate_remote_path("'; touch /tmp/pwn #").is_err());
+        assert!(validate_remote_path("/etc/$(id)/file").is_err());
+        assert!(validate_remote_path("/etc/`id`/file").is_err());
+        assert!(validate_remote_path("/etc/foo|bar").is_err());
+        assert!(validate_remote_path("/etc/foo;rm").is_err());
+        assert!(validate_remote_path("/etc/foo&bar").is_err());
+        assert!(validate_remote_path("").is_err());
+    }
+
+    #[test]
+    fn rejects_path_traversal() {
+        assert!(validate_remote_path("/etc/../shadow").is_err());
+        assert!(validate_remote_path("../etc/passwd").is_err());
+    }
+}
 
 /// Upload a local file to the remote host via the SSH exec channel.
 /// The file is base64-encoded on the local side and decoded on the remote side,
@@ -379,6 +538,8 @@ async fn upload_file(
     executable: bool,
     skip_if_exists: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    validate_remote_path(remote_path)?;
+
     if skip_if_exists && remote_exists(session, remote_path).await? {
         info!("[provision] skip upload (already exists): {}", remote_path);
         return Ok(());
@@ -392,7 +553,8 @@ async fn upload_file(
     if let Some(parent) = Path::new(remote_path).parent() {
         let parent_str = parent.to_string_lossy();
         if !parent_str.is_empty() && parent_str != "/" {
-            exec(session, &format!("mkdir -p {}", parent_str)).await?;
+            validate_remote_path(&parent_str)?;
+            exec_argv(session, "mkdir", &["-p", &parent_str]).await?;
         }
     }
 
@@ -405,15 +567,22 @@ async fn upload_file(
 
     info!("[provision] file size: {} bytes, {} chunk(s)", total, n);
 
-    // Truncate (or create) the remote file first
-    exec(session, &format!("> {}", remote_path)).await?;
+    // Truncate (or create) the remote file first.
+    // Use `:` (POSIX no-op) and redirect to a quoted path — the safest
+    // portable way to truncate to zero bytes.
+    let trunc_cmd = format!(": > {}", sh_single_quote(remote_path));
+    exec(session, &trunc_cmd).await?;
 
     for (idx, chunk) in chunks.iter().enumerate() {
         let encoded = BASE64.encode(chunk);
-        // Use printf instead of echo to avoid interpretation of escape sequences
+        // Quote both `encoded` (base64 alphabet, but we still quote it for
+        // uniformity) and `remote_path` via `sh_single_quote`. The
+        // `validate_remote_path` check above ensures the latter is safe even
+        // before quoting.
         let cmd = format!(
-            "printf '%s' '{}' | base64 -d >> {}",
-            encoded, remote_path
+            "printf '%s' {} | base64 -d >> {}",
+            sh_single_quote(&encoded),
+            sh_single_quote(remote_path),
         );
         let res = exec(session, &cmd).await?;
         if !res.success() {
@@ -429,7 +598,7 @@ async fn upload_file(
     }
 
     if executable {
-        exec(session, &format!("chmod +x {}", remote_path)).await?;
+        exec_argv(session, "chmod", &["+x", remote_path]).await?;
     }
 
     info!("[provision] ✓ uploaded {}", remote_path);
@@ -443,13 +612,14 @@ async fn upload_dir(
     local_dir: &str,
     remote_base: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    validate_remote_path(remote_base)?;
     let local_path = Path::new(local_dir);
     if !local_path.exists() {
         info!("[provision] local directory {} does not exist, skipping", local_dir);
         return Ok(());
     }
 
-    exec(session, &format!("mkdir -p {}", remote_base)).await?;
+    exec_argv(session, "mkdir", &["-p", remote_base]).await?;
 
     upload_dir_recursive(session, local_path, local_path, remote_base).await
 }
@@ -459,7 +629,7 @@ fn upload_dir_recursive<'a>(
     base: &'a Path,
     current: &'a Path,
     remote_base: &'a str,
-) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), Box<dyn std::error::Error>>> + 'a>>
+) -> std::pin::Pin<Box<dyn Future<Output = Result<(), Box<dyn std::error::Error>>> + 'a>>
 {
     Box::pin(async move {
         for entry in std::fs::read_dir(current)
@@ -469,9 +639,14 @@ fn upload_dir_recursive<'a>(
             let path = entry.path();
             let rel = path.strip_prefix(base).unwrap();
             let remote_path = format!("{}/{}", remote_base, rel.to_string_lossy());
+            // `remote_path` is constructed from the validated `remote_base`
+            // plus a relative file name from the local tree. Both segments
+            // should pass `validate_remote_path`; the check is a guardrail
+            // against a future caller passing an unvalidated `remote_base`.
+            validate_remote_path(&remote_path)?;
 
             if path.is_dir() {
-                exec(session, &format!("mkdir -p {}", remote_path)).await?;
+                exec_argv(session, "mkdir", &["-p", &remote_path]).await?;
                 upload_dir_recursive(session, base, &path, remote_base).await?;
             } else {
                 // Skip if already present
@@ -494,7 +669,6 @@ fn upload_dir_recursive<'a>(
         Ok(())
     })
 }
-
 // ── Provisioning Steps ────────────────────────────────────────────────────────
 
 /// Detect which package manager is available on the remote host.
@@ -502,8 +676,7 @@ async fn detect_pkg_manager(
     session: &mut client::Handle<SshHandler>,
 ) -> Result<String, Box<dyn std::error::Error>> {
     for pm in &["apt-get", "apk", "dnf", "yum"] {
-        let res = exec(session, &format!("command -v {} >/dev/null 2>&1", pm)).await?;
-        if res.success() {
+        if command_exists(session, pm).await? {
             return Ok(pm.to_string());
         }
     }
@@ -608,27 +781,40 @@ async fn setup_users_and_dirs(
     };
 
     for (user, group) in &[("vmail", "vmail"), ("opendkim", "opendkim")] {
-        let exists = exec(session, &format!("id {} >/dev/null 2>&1", user))
-            .await?
-            .success();
+        // `user` and `group` are hardcoded literals, but quote them via
+        // sh_single_quote for symmetry and to prevent any future refactor
+        // from quietly introducing a runtime-controlled value.
+        let id_cmd = format!(
+            "{} >/dev/null 2>&1",
+            sh_single_quote(&format!("id {}", user)),
+        );
+        let exists = exec(session, &id_cmd).await?.success();
         if exists {
             info!("[provision] skip: user {} already exists", user);
         } else {
-            // Create group then user
-            exec(
-                session,
-                &format!("groupadd {} {} 2>/dev/null || addgroup {} {} 2>/dev/null || true",
-                    addgroup_flags, group, addgroup_flags, group),
-            )
-            .await?;
+            // Create group then user. addgroup_flags is a static literal so
+            // it is safe to splice directly; user/group are quoted.
+            let group_cmd = format!(
+                "groupadd {} {} 2>/dev/null || addgroup {} {} 2>/dev/null || true",
+                addgroup_flags,
+                sh_single_quote(group),
+                addgroup_flags,
+                sh_single_quote(group),
+            );
+            exec(session, &group_cmd).await?;
+            let user_cmd = format!(
+                "useradd {} -g {} {} 2>/dev/null || adduser {} -G {} {} 2>/dev/null || true",
+                adduser_flags,
+                sh_single_quote(group),
+                sh_single_quote(user),
+                adduser_flags,
+                sh_single_quote(group),
+                sh_single_quote(user),
+            );
             run_remote(
                 session,
                 &format!("create system user {}", user),
-                &format!(
-                    "useradd {} -g {} {} 2>/dev/null || adduser {} -G {} {} 2>/dev/null || true",
-                    adduser_flags, group, user,
-                    adduser_flags, group, user
-                ),
+                &user_cmd,
             )
             .await?;
         }
@@ -828,16 +1014,30 @@ async fn write_remote_text(
     remote_path: &str,
     content: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    // Defence-in-depth: even though the only callers pass hardcoded paths,
+    // we validate to prevent a future caller from injecting a path that
+    // could break out of its single-quoted form on the remote.
+    validate_remote_path(remote_path)?;
+
     // Ensure parent directory exists
     if let Some(parent) = Path::new(remote_path).parent() {
         let p = parent.to_string_lossy();
         if !p.is_empty() && p != "/" {
-            exec(session, &format!("mkdir -p {}", p)).await?;
+            validate_remote_path(&p)?;
+            exec_argv(session, "mkdir", &["-p", &p]).await?;
         }
     }
 
     let encoded = BASE64.encode(content.as_bytes());
-    let cmd = format!("printf '%s' '{}' | base64 -d > {}", encoded, remote_path);
+    // Both `encoded` (base64 alphabet) and `remote_path` (allowlisted) are
+    // wrapped in `sh_single_quote` for uniformity — the validator above
+    // ensures the path is in the safe set even if the quoting were ever
+    // bypassed.
+    let cmd = format!(
+        "printf '%s' {} | base64 -d > {}",
+        sh_single_quote(&encoded),
+        sh_single_quote(remote_path),
+    );
     let res = exec(session, &cmd).await?;
     if !res.success() {
         return Err(format!("failed to write {}: exit {}", remote_path, res.exit_code).into());

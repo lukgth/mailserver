@@ -264,6 +264,9 @@ pub fn start_watcher(db: Database) {
 /// Tail the mail log file, seeking to the end and then processing new lines.
 fn tail_log_file(db: &Database) -> Result<(), std::io::Error> {
     let mut file = File::open(MAIL_LOG_PATH)?;
+    // Capture the inode at open time so we can detect log rotation even when
+    // the new file happens to be the same size or larger than the old one.
+    let current_inode = file_inode(&file);
     // Seek to end — we only process new log lines
     file.seek(SeekFrom::End(0))?;
     let mut reader = BufReader::new(file);
@@ -284,11 +287,19 @@ fn tail_log_file(db: &Database) -> Result<(), std::io::Error> {
                     warn!("[fail2ban] log file disappeared, will re-open");
                     return Ok(());
                 }
+                // Check inode first — if it changed, the file was rotated
+                // (e.g. by logrotate creating a new inode for the new file).
+                let new_inode = file_inode(reader.get_ref());
+                if new_inode != current_inode {
+                    info!("[fail2ban] log file was rotated (inode changed), re-opening");
+                    return Ok(());
+                }
                 // Check file size — if it shrank, the file was rotated
+                // (the old file was truncated or replaced with a smaller one).
                 let meta = std::fs::metadata(MAIL_LOG_PATH)?;
                 let current_pos = reader.get_ref().stream_position()?;
                 if meta.len() < current_pos {
-                    info!("[fail2ban] log file was rotated, re-opening");
+                    info!("[fail2ban] log file was rotated (size decreased), re-opening");
                     return Ok(());
                 }
                 // Refresh cache during idle periods
@@ -325,6 +336,19 @@ fn tail_log_file(db: &Database) -> Result<(), std::io::Error> {
             }
         }
     }
+}
+
+/// Return the inode number of an open file, or 0 if the platform does not
+/// support it (non-Unix). Used to detect log rotation.
+#[cfg(unix)]
+fn file_inode(file: &std::fs::File) -> u64 {
+    use std::os::unix::fs::MetadataExt;
+    file.metadata().map(|m| m.ino()).unwrap_or(0)
+}
+
+#[cfg(not(unix))]
+fn file_inode(_file: &std::fs::File) -> u64 {
+    0
 }
 
 #[cfg(test)]
@@ -418,4 +442,43 @@ mod tests {
         assert_eq!(f.ip, "192.0.2.1");
         assert_eq!(f.service, "smtp");
     }
+
+    #[test]
+    fn file_inode_detects_rotation() {
+        use std::io::Write;
+        let dir = std::env::temp_dir().join(format!("fail2ban_inode_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("test.log");
+
+        // Create initial file and capture its inode
+        {
+            let mut f = std::fs::File::create(&path).unwrap();
+            writeln!(f, "line 1").unwrap();
+        }
+        let f1 = std::fs::File::open(&path).unwrap();
+        let inode1 = file_inode(&f1);
+        drop(f1);
+
+        // Simulate log rotation: rename old file, create new one at same path
+        let rotated = dir.join("test.log.1");
+        std::fs::rename(&path, &rotated).unwrap();
+        {
+            let mut f = std::fs::File::create(&path).unwrap();
+            writeln!(f, "line 2").unwrap();
+        }
+        let f2 = std::fs::File::open(&path).unwrap();
+        let inode2 = file_inode(&f2);
+        drop(f2);
+
+        // On Unix the inode must differ; on non-Unix both are 0.
+        #[cfg(unix)]
+        assert_ne!(inode1, inode2, "inode must change after rotation");
+        #[cfg(not(unix))]
+        assert_eq!(inode1, 0);
+        #[cfg(not(unix))]
+        assert_eq!(inode2, 0);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
+

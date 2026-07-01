@@ -1,5 +1,13 @@
-#!/bin/sh
-set -e
+#!/bin/sh -eu
+set -eu
+
+for v in SEED_PASS HOSTNAME DB_PASSWORD; do
+  val=$(eval "echo \${${v}:-}")
+  if [ -z "$val" ] || echo "$val" | grep -Eq '^(admin|MUST-BE-CHANGED|YOUR_[A-Z_]+_HERE|mailserver)$'; then
+    echo "[entrypoint] FATAL: $v is missing or set to a default/placeholder value" >&2
+    exit 1
+  fi
+done
 
 echo "[entrypoint] INFO: creating data directories"
 mkdir -p /data/ssl /data/dkim /data/mail /data/db
@@ -24,8 +32,8 @@ fi
 # If Let's Encrypt certs exist, copy them to /data/ssl/ for Postfix/Dovecot
 if [ -f "/etc/letsencrypt/live/${HOSTNAME}/fullchain.pem" ] && [ -f "/etc/letsencrypt/live/${HOSTNAME}/privkey.pem" ]; then
     echo "[entrypoint] INFO: using Let's Encrypt certificates for ${HOSTNAME}"
-    cp "/etc/letsencrypt/live/${HOSTNAME}/fullchain.pem" /data/ssl/cert.pem
-    cp "/etc/letsencrypt/live/${HOSTNAME}/privkey.pem" /data/ssl/key.pem
+    cp -p "/etc/letsencrypt/live/${HOSTNAME}/fullchain.pem" /data/ssl/cert.pem
+    cp -p "/etc/letsencrypt/live/${HOSTNAME}/privkey.pem" /data/ssl/key.pem
     chmod 600 /data/ssl/key.pem
     chmod 644 /data/ssl/cert.pem
 fi
@@ -48,20 +56,26 @@ trap 'trap - TERM; kill 0' SIGTERM SIGINT SIGQUIT
 # tee duplicates output to /var/log/mail.log for fail2ban monitoring
 touch /var/log/mail.log
 
-dovecot -F 2>&1 | tee -a /var/log/mail.log &
-DOVECOT_PID=$!  # tee PID — exits when dovecot dies (pipe EOF)
-opendkim -f &
+dovecot -F -P /var/run/dovecot.pid 2>&1 | tee -a /var/log/mail.log &
+DOVECOT_PID=$(cat /var/run/dovecot.pid 2>/dev/null || echo $!)
+opendkim -f -P /var/run/opendkim/opendkim.pid &
 OPENDKIM_PID=$!
 /usr/local/bin/mailserver serve &
 MAILSERVER_PID=$!
 postfix start-fg 2>&1 | tee -a /var/log/mail.log &
-POSTFIX_PID=$!  # tee PID — exits when postfix dies (pipe EOF)
+POSTFIX_PID=$(cat /var/spool/postfix/pid/master.pid 2>/dev/null || echo $!)
 
 # Monitor all services — exit if any process dies
-while kill -0 $DOVECOT_PID 2>/dev/null && \
-      kill -0 $OPENDKIM_PID 2>/dev/null && \
-      kill -0 $MAILSERVER_PID 2>/dev/null && \
-      kill -0 $POSTFIX_PID 2>/dev/null; do
-    sleep 5
+while true; do
+  for pid_info in "$DOVECOT_PID:dovecot" "$OPENDKIM_PID:opendkim" "$MAILSERVER_PID:mailserver" "$POSTFIX_PID:postfix"; do
+    pid="${pid_info%%:*}"
+    label="${pid_info#*:}"
+    if [ -z "$pid" ] || ! kill -0 "$pid" 2>/dev/null; then
+      echo "[entrypoint] ERROR: $label (PID $pid) has exited, shutting down"
+      kill 0
+      exit 1
+    fi
+  done
+  sleep 5
 done
-echo "[entrypoint] ERROR: a service has exited, shutting down"
+

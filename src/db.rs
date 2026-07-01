@@ -2,6 +2,7 @@ use log::{debug, error, info, warn};
 use postgres::{Client, NoTls};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard};
 
 /// Constant-time comparison of two byte slices to prevent timing side-channels.
@@ -483,12 +484,19 @@ fn load_available_migrations() -> Vec<(String, String)> {
         paths.push(cwd.join("mailserver/migrations"));
     }
 
-    let mut seen = HashSet::new();
-    paths.retain(|p| seen.insert(p.to_string_lossy().into_owned()));
+    // Deduplicate by canonical path so the same directory mounted at
+    // multiple search locations is only scanned once.
+    let mut seen_canonical: HashSet<PathBuf> = HashSet::new();
     let mut found_any = false;
 
     for path in &paths {
         if !path.exists() || !path.is_dir() {
+            continue;
+        }
+        // Canonicalise to catch symlinks and duplicate mounts.
+        let canonical = path.canonicalize().unwrap_or_else(|_| path.clone());
+        if !seen_canonical.insert(canonical) {
+            debug!("[db] skipping already-scanned migrations directory: {}", path.display());
             continue;
         }
 
@@ -505,9 +513,6 @@ fn load_available_migrations() -> Vec<(String, String)> {
                 }
             }
         }
-        // If we found a valid directory, we stop looking at other paths to avoid duplicates
-        // or mixing environments (unless we want to merge, but typically one source is enough)
-        break;
     }
 
     if !found_any {
@@ -571,7 +576,7 @@ fn minimal_runtime_bootstrap_sql() -> [&'static str; 1] {
     )"]
 }
 
-fn run_migrations(client: &mut Client) {
+fn run_migrations(client: &mut Client) -> Result<(), String> {
     info!("[db] checking for database migrations");
 
     // 1. Create _migrations table if it doesn't exist
@@ -584,7 +589,7 @@ fn run_migrations(client: &mut Client) {
             )",
             &[],
         )
-        .expect("Failed to create _migrations table");
+        .map_err(|e| format!("Failed to create _migrations table: {}", e))?;
     bootstrap_minimal_runtime_tables(client);
 
     // 2. Load migrations from files, falling back to embedded migrations
@@ -602,23 +607,28 @@ fn run_migrations(client: &mut Client) {
     for (name, sql) in migrations {
         let rows = client
             .query("SELECT id FROM _migrations WHERE name = $1", &[&name])
-            .expect("Failed to query _migrations");
+            .map_err(|e| format!("Failed to query _migrations: {}", e))?;
 
         if rows.is_empty() {
             info!("[db] applying migration: {}", name);
-            let mut transaction = client.transaction().expect("Failed to start transaction");
+            let mut transaction = client
+                .transaction()
+                .map_err(|e| format!("Failed to start transaction: {}", e))?;
             transaction
                 .batch_execute(&sql)
-                .expect("Failed to execute migration script");
+                .map_err(|e| format!("Failed to execute migration script '{}': {}", name, e))?;
             transaction
                 .execute("INSERT INTO _migrations (name) VALUES ($1)", &[&name])
-                .expect("Failed to record migration");
-            transaction.commit().expect("Failed to commit transaction");
+                .map_err(|e| format!("Failed to record migration '{}': {}", name, e))?;
+            transaction
+                .commit()
+                .map_err(|e| format!("Failed to commit migration '{}': {}", name, e))?;
             info!("[db] migration {} applied successfully", name);
         } else {
             debug!("[db] migration {} already applied", name);
         }
     }
+    Ok(())
 }
 
 fn matches_from_pattern(pattern: &str, sender: &str) -> bool {
@@ -752,7 +762,10 @@ impl Database {
             }
         };
 
-        run_migrations(&mut client);
+        run_migrations(&mut client).map_err(|e| {
+            error!("[db] migration failed: {}", e);
+            e
+        })?;
 
         info!("[db] PostgreSQL database opened and schema initialized successfully");
         Ok(Database {

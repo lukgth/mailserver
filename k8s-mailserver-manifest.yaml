@@ -13,6 +13,8 @@ stringData:
   # WARNING: template values below must be replaced before use.
   # For production, prefer external secret managers (Sealed Secrets / External Secrets).
   # REQUIRED: replace with your PostgreSQL connection string
+  # NOTE: The entrypoint.sh now rejects these placeholder values at boot.
+  # Replace YOUR_DB_PASSWORD_HERE and YOUR_ADMIN_PASSWORD_HERE before deploying.
   DATABASE_URL: "postgres://mailserver:YOUR_DB_PASSWORD_HERE@your-postgres-host/mailserver"
   # REQUIRED: change initial admin password
   SEED_PASS: "YOUR_ADMIN_PASSWORD_HERE"

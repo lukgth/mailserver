@@ -1082,12 +1082,12 @@ localhost
                         Ok(o) if o.status.success() => {
                             debug!("[config] set opendkim ownership on {}", key_path)
                         }
-                        Ok(o) => warn!(
+                        Ok(o) => error!(
                             "[config] chown opendkim:opendkim {} failed: {}",
                             key_path,
                             String::from_utf8_lossy(&o.stderr)
                         ),
-                        Err(e) => warn!("[config] failed to chown {}: {}", key_path, e),
+                        Err(e) => error!("[config] failed to chown {}: {}", key_path, e),
                     }
                 }
                 Err(e) => error!(

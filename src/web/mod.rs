@@ -190,26 +190,31 @@ pub async fn csrf_middleware(
                 }
             };
 
-            // Parse _csrf_token from form body
-            let form_token = if method == Method::POST {
-                let body_str = String::from_utf8_lossy(&bytes);
-                body_str.split('&').find_map(|pair| {
-                    let mut kv = pair.splitn(2, '=');
-                    let k = kv.next()?;
-                    if k == CSRF_FIELD {
-                        let v = kv.next()?;
-                        Some(v.replace('+', " "))
-                    } else {
-                        None
-                    }
-                })
+            // Only parse the form body for form-encoded or multipart content types.
+            // JSON API calls (Content-Type: application/json) pass the token via
+            // the X-CSRF-Token header and must not be forced to include a form field.
+            let ct = parts
+                .headers
+                .get(header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("");
+            let is_form = ct.starts_with("application/x-www-form-urlencoded")
+                || ct.starts_with("multipart/form-data");
+
+            let form_token = if method == Method::POST && is_form {
+                let parsed: Vec<(String, String)> =
+                    form_urlencoded::parse(&bytes).into_owned().collect();
+                parsed
+                    .into_iter()
+                    .find(|(k, _)| k == CSRF_FIELD)
+                    .map(|(_, v)| v)
             } else {
                 None
             };
 
             let submitted = form_token.or(header_token);
             match submitted {
-                Some(ref t) if t == cookie_val => {
+                Some(ref t) if crate::db::constant_time_eq(t.as_bytes(), cookie_val.as_bytes()) => {
                     // Valid — reconstruct request with original body
                     let mut builder = axum::http::Request::builder()
                         .method(parts.method)

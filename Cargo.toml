@@ -38,3 +38,4 @@ zip = { version = "8", default-features = false, features = ["deflate"] }
 tokio-stream = { version = "0.1", features = ["sync"] }
 hex = "0.4"
 russh = { version = "0.60.2", default-features = false, features = ["flate2", "ring"] }
+form_urlencoded = "1"

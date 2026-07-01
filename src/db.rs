@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 /// Constant-time comparison of two byte slices to prevent timing side-channels.
 /// Returns false immediately on length mismatch (length is not secret).
-fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+pub(crate) fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     if a.len() != b.len() {
         return false;
     }

@@ -448,29 +448,32 @@ pub(crate) async fn regen_configs(state: &AppState) {
 /// `details` — a JSON-serialisable value with event-specific information
 pub(crate) fn fire_webhook(state: &AppState, event: &str, details: serde_json::Value) {
     let db = state.db.clone();
-    let webhook_url = db.get_setting("webhook_url").unwrap_or_default();
-    if webhook_url.is_empty() {
-        return;
-    }
+    let event = event.to_string();
+    let details = details;
 
-    // Security: validate webhook URL
-    if !webhook_url.starts_with("https://") {
-        warn!("[webhook] rejecting non-HTTPS webhook URL: {}", webhook_url);
-        return;
-    }
-    // Block internal IPs and localhost
-    let blocked = ["127.0.0.1", "localhost", "::1", "0.0.0.0", "10.", "172.16.", "172.17.", "172.18.", "172.19.", "172.20.", "172.21.", "172.22.", "172.23.", "172.24.", "172.25.", "172.26.", "172.27.", "172.28.", "172.29.", "172.30.", "172.31.", "192.168."];
-    let url_lower = webhook_url.to_lowercase();
-    for prefix in &blocked {
-        if url_lower.contains(prefix) {
-            warn!("[webhook] rejecting webhook URL pointing to internal address: {}", webhook_url);
+    // All DB access runs on the spawned thread to avoid "Cannot start a runtime
+    // from within a runtime" — the sync postgres::Client creates its own tokio
+    // runtime internally and panics if called from within an existing one.
+    std::thread::spawn(move || {
+        let webhook_url = db.get_setting("webhook_url").unwrap_or_default();
+        if webhook_url.is_empty() {
             return;
         }
-    }
 
-    let event = event.to_string();
-
-    std::thread::spawn(move || {
+        // Security: validate webhook URL
+        if !webhook_url.starts_with("https://") {
+            warn!("[webhook] rejecting non-HTTPS webhook URL: {}", webhook_url);
+            return;
+        }
+        // Block internal IPs and localhost
+        let blocked = ["127.0.0.1", "localhost", "::1", "0.0.0.0", "10.", "172.16.", "172.17.", "172.18.", "172.19.", "172.20.", "172.21.", "172.22.", "172.23.", "172.24.", "172.25.", "172.26.", "172.27.", "172.28.", "172.29.", "172.30.", "172.31.", "192.168."];
+        let url_lower = webhook_url.to_lowercase();
+        for prefix in &blocked {
+            if url_lower.contains(prefix) {
+                warn!("[webhook] rejecting webhook URL pointing to internal address: {}", webhook_url);
+                return;
+            }
+        }
 
         let timestamp = chrono::Utc::now().to_rfc3339();
         let payload = serde_json::json!({

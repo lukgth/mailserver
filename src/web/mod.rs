@@ -174,7 +174,7 @@ pub async fn csrf_middleware(
 
     // For POST/PUT/DELETE, validate the CSRF token
     if method == Method::POST || method == Method::PUT || method == Method::DELETE {
-        if let Some(ref cookie_val) = cookie_token {
+        if let Some(cookie_val) = &cookie_token {
             // Extract X-CSRF-Token header before consuming request
             let header_token = req
                 .headers()
@@ -213,21 +213,14 @@ pub async fn csrf_middleware(
             };
 
             let submitted = form_token.or(header_token);
-            match submitted {
-                Some(ref t) if crate::db::constant_time_eq(t.as_bytes(), cookie_val.as_bytes()) => {
-                    // Valid — reconstruct request with original body
-                    let mut builder = axum::http::Request::builder()
-                        .method(parts.method)
-                        .uri(parts.uri);
-                    for (k, v) in parts.headers.iter() {
-                        builder = builder.header(k.clone(), v.clone());
-                    }
-                    let req = match builder.body(axum::body::Body::from(bytes)) {
-                        Ok(r) => r,
-                        Err(_) => {
-                            return (StatusCode::INTERNAL_SERVER_ERROR, "Internal error").into_response();
-                        }
-                    };
+            match &submitted {
+                Some(t) if crate::db::constant_time_eq(t.as_bytes(), cookie_val.as_bytes()) => {
+                    // Valid — reconstruct request with the original body.
+                    // Use from_parts (NOT Request::builder) so request extensions
+                    // are preserved; axum stores matched path parameters there, and
+                    // dropping them causes Path extractors to fail with
+                    // "No paths parameters found for matched route".
+                    let req = axum::http::Request::from_parts(parts, axum::body::Body::from(bytes));
                     let mut response = next.run(req).await;
                     ensure_csrf_cookie(&mut response, &cookie_token);
                     return response;

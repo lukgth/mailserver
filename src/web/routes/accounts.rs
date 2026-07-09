@@ -13,12 +13,6 @@ use crate::web::auth::AuthAdmin;
 use crate::web::fire_webhook;
 use crate::web::forms::{AccountEditForm, AccountForm};
 use crate::web::regen_configs;
-
-#[derive(Deserialize)]
-pub struct IdParam {
-    pub id: i64,
-}
-
 use crate::web::AppState;
 
 // ── Query parameters ──
@@ -312,9 +306,9 @@ pub async fn update(
 }
 
 pub async fn delete(
-    Path(IdParam { id }): Path<IdParam>,
     _auth: AuthAdmin,
     State(state): State<AppState>,
+    Path(id): Path<i64>,
 ) -> Response {
     warn!("[web] POST /accounts/{}/delete — deleting account", id);
     state.blocking_db(move |db| db.delete_account(id)).await;

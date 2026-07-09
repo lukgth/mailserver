@@ -312,9 +312,9 @@ pub async fn update(
 }
 
 pub async fn delete(
+    Path(IdParam { id }): Path<IdParam>,
     _auth: AuthAdmin,
     State(state): State<AppState>,
-    Path(IdParam { id }): Path<IdParam>,
 ) -> Response {
     warn!("[web] POST /accounts/{}/delete — deleting account", id);
     state.blocking_db(move |db| db.delete_account(id)).await;

@@ -15,8 +15,8 @@ use crate::web::forms::{AccountEditForm, AccountForm};
 use crate::web::regen_configs;
 
 #[derive(Deserialize)]
-struct IdParam {
-    id: i64,
+pub struct IdParam {
+    pub id: i64,
 }
 
 use crate::web::AppState;

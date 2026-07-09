@@ -253,7 +253,7 @@ pub async fn csrf_middleware(
 fn ensure_csrf_cookie(response: &mut Response, existing: &Option<String>) {
     if existing.is_none() {
         let token = generate_csrf_token();
-        let cookie_val = format!("{}={}; Path=/; SameSite=Strict; HttpOnly=false", CSRF_COOKIE, token);
+        let cookie_val = format!("{}={}; Path=/; SameSite=Strict", CSRF_COOKIE, token);
         if let Ok(val) = HeaderValue::from_str(&cookie_val) {
             response.headers_mut().append(header::SET_COOKIE, val);
         }

@@ -47,67 +47,67 @@ pub fn auth_routes() -> Router<AppState> {
         .route("/", get(dashboard::page))
         .route("/domains", get(domains::list).post(domains::create))
         .route("/domains/new", get(domains::new_form))
-        .route("/domains/{id}/edit", get(domains::edit_form))
-        .route("/domains/{id}/delete", post(domains::delete))
-        .route("/domains/{id}/dkim", post(domains::generate_dkim))
-        .route("/domains/{id}/dmarc", post(domains::set_dmarc_inbox))
-        .route("/domains/{id}/dmarc/delete", post(domains::remove_dmarc_inbox))
-        .route("/domains/{id}/dmarc/ruf", post(domains::set_dmarc_ruf_inbox))
-        .route("/domains/{id}/dmarc/ruf/delete", post(domains::remove_dmarc_ruf_inbox))
-        .route("/domains/{id}/abuse", post(domains::set_abuse_inbox))
-        .route("/domains/{id}/abuse/delete", post(domains::remove_abuse_inbox))
-        .route("/domains/{id}/bounce", post(domains::set_bounce_inbox))
-        .route("/domains/{id}/bounce/delete", post(domains::remove_bounce_inbox))
-        .route("/domains/{id}/dns", get(domains::dns_info))
-        .route("/domains/{id}/dns/export", get(domains::dns_export))
-        .route("/domains/{id}/check", get(domains::dns_check_run))
-        .route("/domains/{id}", post(domains::update))
+        .route("/domains/:id/edit", get(domains::edit_form))
+        .route("/domains/:id/delete", post(domains::delete))
+        .route("/domains/:id/dkim", post(domains::generate_dkim))
+        .route("/domains/:id/dmarc", post(domains::set_dmarc_inbox))
+        .route("/domains/:id/dmarc/delete", post(domains::remove_dmarc_inbox))
+        .route("/domains/:id/dmarc/ruf", post(domains::set_dmarc_ruf_inbox))
+        .route("/domains/:id/dmarc/ruf/delete", post(domains::remove_dmarc_ruf_inbox))
+        .route("/domains/:id/abuse", post(domains::set_abuse_inbox))
+        .route("/domains/:id/abuse/delete", post(domains::remove_abuse_inbox))
+        .route("/domains/:id/bounce", post(domains::set_bounce_inbox))
+        .route("/domains/:id/bounce/delete", post(domains::remove_bounce_inbox))
+        .route("/domains/:id/dns", get(domains::dns_info))
+        .route("/domains/:id/dns/export", get(domains::dns_export))
+        .route("/domains/:id/check", get(domains::dns_check_run))
+        .route("/domains/:id", post(domains::update))
         .route("/accounts/new", get(accounts::new_form))
         .route("/accounts", get(accounts::list).post(accounts::create))
-        .route("/accounts/{id}/edit", get(accounts::edit_form))
-        .route("/accounts/{id}/delete", post(accounts::delete))
-        .route("/accounts/{id}", post(accounts::update))
+        .route("/accounts/:id/edit", get(accounts::edit_form))
+        .route("/accounts/:id/delete", post(accounts::delete))
+        .route("/accounts/:id", post(accounts::update))
         .route("/aliases/new", get(aliases::new_form))
         .route("/aliases", get(aliases::list).post(aliases::create))
-        .route("/aliases/{id}/edit", get(aliases::edit_form))
-        .route("/aliases/{id}/delete", post(aliases::delete))
-        .route("/aliases/{id}", post(aliases::update))
+        .route("/aliases/:id/edit", get(aliases::edit_form))
+        .route("/aliases/:id/delete", post(aliases::delete))
+        .route("/aliases/:id", post(aliases::update))
         .route("/forwarding/new", get(forwarding::new_form))
         .route(
             "/forwarding",
             get(forwarding::list).post(forwarding::create),
         )
-        .route("/forwarding/{id}/edit", get(forwarding::edit_form))
-        .route("/forwarding/{id}/delete", post(forwarding::delete))
-        .route("/forwarding/{id}", post(forwarding::update))
+        .route("/forwarding/:id/edit", get(forwarding::edit_form))
+        .route("/forwarding/:id/delete", post(forwarding::delete))
+        .route("/forwarding/:id", post(forwarding::update))
         .route("/tracking", get(tracking::list))
         .route("/tracking/pixel", post(tracking::update_pixel_settings))
         .route("/tracking/patterns", post(tracking::create_pattern))
         .route(
-            "/tracking/patterns/{id}/delete",
+            "/tracking/patterns/:id/delete",
             post(tracking::delete_pattern),
         )
         .route("/tracking/rules", post(tracking::create_rule))
-        .route("/tracking/rules/{id}/delete", post(tracking::delete_rule))
-        .route("/tracking/{msg_id}", get(tracking::detail))
+        .route("/tracking/rules/:id/delete", post(tracking::delete_rule))
+        .route("/tracking/:msg_id", get(tracking::detail))
         .route("/footer", get(footer::list))
         .route("/footer/content", post(footer::update_content))
         .route("/footer/patterns", post(footer::create_pattern))
-        .route("/footer/patterns/{id}/delete", post(footer::delete_pattern))
+        .route("/footer/patterns/:id/delete", post(footer::delete_pattern))
         .route("/footer/rules", post(footer::create_rule))
-        .route("/footer/rules/{id}/delete", post(footer::delete_rule))
+        .route("/footer/rules/:id/delete", post(footer::delete_rule))
         .route("/queue", get(queue::list))
         .route("/queue/flush", post(queue::flush))
         .route("/queue/purge", post(queue::purge))
-        .route("/queue/{id}/delete", post(queue::delete_message))
-        .route("/queue/{id}/flush", post(queue::flush_message))
+        .route("/queue/:id/delete", post(queue::delete_message))
+        .route("/queue/:id/flush", post(queue::flush_message))
         .route("/quarantine", get(quarantine::list))
         .route("/logout", get(logout_handler))
         .route("/mailbox", get(webmail::inbox))
-        .route("/mailbox/view/{filename}", get(webmail::view_email))
-        .route("/mailbox/download/{filename}", get(webmail::download_email))
-        .route("/mailbox/reply/{filename}", get(webmail::reply_email))
-        .route("/mailbox/delete/{filename}", post(webmail::delete_email))
+        .route("/mailbox/view/:filename", get(webmail::view_email))
+        .route("/mailbox/download/:filename", get(webmail::download_email))
+        .route("/mailbox/reply/:filename", get(webmail::reply_email))
+        .route("/mailbox/delete/:filename", post(webmail::delete_email))
         .route("/mailbox/compose", get(webmail::compose))
         .route("/mailbox/send", post(webmail::send_email))
         .route("/mailbox/idle", get(webmail::idle_stream))
@@ -117,7 +117,7 @@ pub fn auth_routes() -> Router<AppState> {
             post(imap_idle::disconnect_all),
         )
         .route(
-            "/imap-idle/{id}/disconnect",
+            "/imap-idle/:id/disconnect",
             post(imap_idle::disconnect),
         )
         .route("/settings", get(settings::page))
@@ -135,7 +135,7 @@ pub fn auth_routes() -> Router<AppState> {
         )
         .route("/invite-codes", get(invite_codes::list))
         .route("/invite-codes/generate", post(invite_codes::generate))
-        .route("/invite-codes/{id}/delete", post(invite_codes::delete_code))
+        .route("/invite-codes/:id/delete", post(invite_codes::delete_code))
         .route("/dns-records", get(dns_export::page))
         .route("/configs", get(configs::page))
         .route("/api", get(api_docs::page))
@@ -143,51 +143,51 @@ pub fn auth_routes() -> Router<AppState> {
         .route("/api/token/revoke", post(api_docs::revoke_token))
         .route("/api/emails", get(api_email::list_emails).post(api_email::send_email))
         .route(
-            "/api/emails/{filename}",
+            "/api/emails/:filename",
             get(api_email::get_email).delete(api_email::delete_email),
         )
         .route("/api/soap", get(api_soap::wsdl).post(api_soap::handle))
         .route("/fail2ban", get(fail2ban::overview))
         .route("/fail2ban/toggle", post(fail2ban::toggle_system))
         .route("/fail2ban/ban", post(fail2ban::ban_ip))
-        .route("/fail2ban/unban/{id}", post(fail2ban::unban_ip))
+        .route("/fail2ban/unban/:id", post(fail2ban::unban_ip))
         .route(
-            "/fail2ban/settings/{id}/edit",
+            "/fail2ban/settings/:id/edit",
             get(fail2ban::edit_setting_form),
         )
-        .route("/fail2ban/settings/{id}", post(fail2ban::update_setting))
+        .route("/fail2ban/settings/:id", post(fail2ban::update_setting))
         .route("/fail2ban/whitelist", post(fail2ban::add_whitelist))
         .route(
-            "/fail2ban/whitelist/{id}/delete",
+            "/fail2ban/whitelist/:id/delete",
             post(fail2ban::remove_whitelist),
         )
         .route("/fail2ban/blacklist", post(fail2ban::add_blacklist))
         .route(
-            "/fail2ban/blacklist/{id}/delete",
+            "/fail2ban/blacklist/:id/delete",
             post(fail2ban::remove_blacklist),
         )
         .route("/unsubscribe/list", get(unsubscribe::list))
-        .route("/unsubscribe/{id}/delete", post(unsubscribe::delete))
+        .route("/unsubscribe/:id/delete", post(unsubscribe::delete))
         .route("/unsubscribe/patterns", post(unsubscribe::create_pattern))
-        .route("/unsubscribe/patterns/{id}/delete", post(unsubscribe::delete_pattern))
+        .route("/unsubscribe/patterns/:id/delete", post(unsubscribe::delete_pattern))
         .route("/unsubscribe/rules", post(unsubscribe::create_rule))
-        .route("/unsubscribe/rules/{id}/delete", post(unsubscribe::delete_rule))
+        .route("/unsubscribe/rules/:id/delete", post(unsubscribe::delete_rule))
         .route("/spambl", get(spambl::list))
         .route("/spambl/toggle", post(spambl::toggle))
         .route("/webhooks", get(webhook::list))
         .route("/webhooks/settings", post(webhook::update_webhook))
         .route("/webhooks/test", post(webhook::test_webhook))
-        .route("/webhooks/{id}/retry", post(webhook::retry_webhook))
-        .route("/dmarc/{id}/reports", get(dmarc::reports))
-        .route("/abuse/{id}/reports", get(abuse::reports))
-        .route("/bounce/{id}/reports", get(bounce::reports))
+        .route("/webhooks/:id/retry", post(webhook::retry_webhook))
+        .route("/dmarc/:id/reports", get(dmarc::reports))
+        .route("/abuse/:id/reports", get(abuse::reports))
+        .route("/bounce/:id/reports", get(bounce::reports))
         .route("/relays/new", get(relays::new_form))
         .route("/relays", get(relays::list).post(relays::create))
-        .route("/relays/{id}/edit", get(relays::edit_form))
-        .route("/relays/{id}/delete", post(relays::delete))
-        .route("/relays/{id}", post(relays::update))
-        .route("/relays/{id}/assignments", post(relays::add_assignment))
-        .route("/relays/{id}/assignments/{aid}/delete",
+        .route("/relays/:id/edit", get(relays::edit_form))
+        .route("/relays/:id/delete", post(relays::delete))
+        .route("/relays/:id", post(relays::update))
+        .route("/relays/:id/assignments", post(relays::add_assignment))
+        .route("/relays/:id/assignments/:aid/delete",
             post(relays::remove_assignment),
         )
         .route("/caldav", get(caldav::admin_list))
@@ -196,11 +196,11 @@ pub fn auth_routes() -> Router<AppState> {
             post(caldav::admin_create_calendar),
         )
         .route(
-            "/caldav/admin/calendars/{id}/delete",
+            "/caldav/admin/calendars/:id/delete",
             post(caldav::admin_delete_calendar),
         )
         .route(
-            "/caldav/admin/objects/{id}/delete",
+            "/caldav/admin/objects/:id/delete",
             post(caldav::admin_delete_object),
         )
         .route("/carddav", get(carddav::admin_list))
@@ -209,21 +209,21 @@ pub fn auth_routes() -> Router<AppState> {
             post(carddav::admin_create_addressbook),
         )
         .route(
-            "/carddav/admin/addressbooks/{id}/delete",
+            "/carddav/admin/addressbooks/:id/delete",
             post(carddav::admin_delete_addressbook),
         )
         .route(
-            "/carddav/admin/objects/{id}/delete",
+            "/carddav/admin/objects/:id/delete",
             post(carddav::admin_delete_object),
         )
         .route("/mcp", get(mcp::page).post(mcp::handle))
         .route("/webdav", get(webdav::list))
         .route("/webdav/settings", post(webdav::update_settings))
-        .route("/webdav/{id}/delete", post(webdav::admin_delete_file))
+        .route("/webdav/:id/delete", post(webdav::admin_delete_file))
         .route("/rate-limits", get(rate_limits::list))
         .route("/rate-limits/rules", post(rate_limits::create_rule))
         .route(
-            "/rate-limits/rules/{id}/delete",
+            "/rate-limits/rules/:id/delete",
             post(rate_limits::delete_rule),
         )
 }
@@ -254,5 +254,5 @@ pub fn registration_routes() -> Router<AppState> {
             get(registration::show_form).post(registration::handle_form),
         )
         .route("/register/success", get(registration::show_success))
-        .route("/register/{domain}", get(registration::redirect_old))
+        .route("/register/:domain", get(registration::redirect_old))
 }

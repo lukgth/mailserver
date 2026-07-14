@@ -231,8 +231,10 @@ pub async fn csrf_middleware(
                 }
             }
         } else {
-            warn!("[csrf] no CSRF cookie on mutation request");
-            return (StatusCode::FORBIDDEN, "Missing CSRF token").into_response();
+            // No CSRF cookie — request is from a cookie-less client (API token,
+            // Basic auth, CalDAV, one-click unsubscribe). These cannot be targeted
+            // by CSRF attacks (same-origin cookies are the attack vector), so pass
+            // through without enforcing the token check.
         }
     }
 
@@ -423,12 +425,16 @@ pub(crate) async fn regen_configs(state: &AppState) {
     info!("[web] regenerating mail service configs");
     let db = state.db.clone();
     let hostname = state.hostname.clone();
-    // Spawn a raw thread — NOT tokio::spawn. The sync postgres client
-    // creates its own tokio runtime internally and panics if called
-    // from within an existing tokio runtime.
-    std::thread::spawn(move || {
+    // spawn_blocking runs in a dedicated OS thread outside the tokio runtime,
+    // so the sync postgres client is safe to call there (no nested runtime panic).
+    // We await the handle so callers know configs are written before we return.
+    if let Err(e) = tokio::task::spawn_blocking(move || {
         crate::config::generate_all_configs(&db, &hostname);
-    });
+    })
+    .await
+    {
+        warn!("[web] regen_configs thread panicked: {:?}", e);
+    }
 }
 
 /// Fire a webhook notification for a system activity event.

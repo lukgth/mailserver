@@ -32,7 +32,7 @@ services:
       HOSTNAME: mail.test.local
       ADMIN_PORT: "8080"
       SEED_USER: admin
-      SEED_PASS: admin
+      SEED_PASS: testpass01
     ports:
       - "2525:25"
       - "5875:587"
@@ -70,4 +70,4 @@ services:
       POP3S_PORT: "995"
       HTTP_PORT: "8080"
       ADMIN_USER: admin
-      ADMIN_PASS: admin
+      ADMIN_PASS: testpass01

@@ -40,8 +40,10 @@ if [ ! -f .env ]; then
   cp .env.example .env
   sed -i "s/HOSTNAME=mail.example.com/HOSTNAME=$DOMAIN/" .env
   DB_PASS=$(head -c 32 /dev/urandom | base64 | tr -dc 'a-zA-Z0-9' | head -c 24)
-  sed -i "s/DB_PASSWORD=changeme/DB_PASSWORD=$DB_PASS/" .env
-  echo "  .env created (DB password auto-generated)"
+  SEED_PASS=$(head -c 32 /dev/urandom | base64 | tr -dc 'a-zA-Z0-9' | head -c 20)
+  sed -i "s/DB_PASSWORD=MUST-BE-CHANGED/DB_PASSWORD=$DB_PASS/" .env
+  sed -i "s/SEED_PASS=MUST-BE-CHANGED/SEED_PASS=$SEED_PASS/" .env
+  echo "  .env created (DB password and admin password auto-generated)"
 else
   echo "▸ .env already exists, skipping"
 fi

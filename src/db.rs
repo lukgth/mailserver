@@ -2304,7 +2304,7 @@ impl Database {
             )
             .ok()
             .flatten()
-            .map(|r| r.get(0))
+            .map(|r| r.get::<_, i32>(0) as i64)
             .unwrap_or(0);
 
         if count >= limit {

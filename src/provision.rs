@@ -450,11 +450,11 @@ async fn command_exists(
     command: &str,
 ) -> Result<bool, Box<dyn std::error::Error>> {
     // `command` is the only attacker-controlled piece; quoting it via
-    // `sh_single_quote` neutralises `;` / `$(...)` / `&&`. The redirect
-    // is appended unquoted because it is a static literal.
+    // `sh_single_quote` neutralises `;` / `$(...)` / `&&`. `command -v` tests
+    // for the program in PATH without executing it. The `command -v` and the
+    // redirect are appended unquoted because they are static literals.
     let cmd = format!(
-        "{} {} >/dev/null 2>&1",
-        sh_single_quote("command"),
+        "command -v {} >/dev/null 2>&1",
         sh_single_quote(command),
     );
     let res = exec(session, &cmd).await?;

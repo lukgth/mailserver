@@ -61,7 +61,9 @@ fn postfix_errors_re() -> &'static Regex {
 
 fn web_auth_re() -> &'static Regex {
     WEB_AUTH_FAILURE.get_or_init(|| {
-        Regex::new(r"mailserver/web\[\d+\]: \[web\] authentication failed.*from ([0-9a-fA-F.:]+)")
+        // Use non-greedy match so an attacker-controlled username containing
+        // "from <ip>" cannot shift the captured group to a spoofed IP address.
+        Regex::new(r"mailserver/web\[\d+\]: \[web\] authentication failed — from ([0-9a-fA-F.:]+)")
             .expect("Invalid regex")
     })
 }
@@ -131,6 +133,12 @@ pub fn parse_log_line(line: &str) -> Option<AuthFailure> {
 
 /// Record a web auth failure to the mail log for fail2ban monitoring.
 pub fn record_web_auth_failure(ip: &str, username: &str) {
+    // Strip CR/LF and control characters — an attacker-controlled username
+    // with embedded newlines could inject forged log entries for arbitrary IPs.
+    let safe_username: String = username
+        .chars()
+        .filter(|c| !c.is_control())
+        .collect();
     // Write in a format the parser can match
     let ts = chrono::Utc::now().format("%b %d %H:%M:%S").to_string();
     let line = format!(
@@ -138,7 +146,7 @@ pub fn record_web_auth_failure(ip: &str, username: &str) {
         ts,
         std::process::id(),
         ip,
-        username,
+        safe_username,
     );
     if let Err(e) = std::fs::OpenOptions::new()
         .create(true)

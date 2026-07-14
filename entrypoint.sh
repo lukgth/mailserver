@@ -53,8 +53,11 @@ echo "[entrypoint] INFO: starting services"
 trap 'trap - TERM; kill 0' SIGTERM SIGINT SIGQUIT
 
 # Postfix and Dovecot log to stdout directly (via /dev/stdout)
-# tee duplicates output to /var/log/mail.log for fail2ban monitoring
+# tee duplicates output to /var/log/mail.log for fail2ban monitoring.
+# Postfix is configured to write directly to /var/log/mail.log via maillog_file
+# so its logs are captured even though it runs daemonised.
 touch /var/log/mail.log
+postconf -e "maillog_file = /var/log/mail.log"
 
 dovecot -F 2>&1 | tee -a /var/log/mail.log &
 DOVECOT_PID=$!
@@ -63,7 +66,21 @@ OPENDKIM_PID=$!
 /usr/local/bin/mailserver serve &
 MAILSERVER_PID=$!
 postfix start
-POSTFIX_PID=$(cat /var/spool/postfix/pid/master.pid 2>/dev/null | tr -d ' \t\n\r' || echo 0)
+
+# Wait up to 10 s for Postfix to write its PID file, then read it.
+# Do NOT use a fallback of 0 — kill -0 0 signals the whole process group,
+# masking a crashed Postfix as "still running".
+POSTFIX_PID=""
+for i in $(seq 1 10); do
+  POSTFIX_PID=$(cat /var/spool/postfix/pid/master.pid 2>/dev/null | tr -d ' \t\n\r')
+  [ -n "$POSTFIX_PID" ] && break
+  sleep 1
+done
+if [ -z "$POSTFIX_PID" ]; then
+  echo "[entrypoint] FATAL: postfix did not write a PID file — aborting" >&2
+  kill 0
+  exit 1
+fi
 
 # Monitor all services — exit if any process dies
 while true; do

@@ -83,8 +83,10 @@ services:
     ports:
       - "80:80"
       - "443:443"
+    environment:
+      NGINX_HOST: ${HOSTNAME:-mail.example.com}
     volumes:
-      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/nginx.conf.template:/etc/nginx/templates/nginx.conf.template:ro
       - ./nginx/proxy_params.conf:/etc/nginx/proxy_params.conf:ro
       - ./nginx/certs:/etc/letsencrypt:ro
       - certbot-www:/var/www/certbot:ro

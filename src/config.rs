@@ -472,8 +472,11 @@ pub fn generate_postfix_main_cf(db: &Database, hostname: &str) {
         .to_string();
 
     let milter_config = if milter_enabled {
-        r#"smtpd_milters = inet:spamass-milter:9999
-non_smtpd_milters = inet:spamass-milter:9999
+        // OpenDKIM (port 8891) signs all mail; spamass-milter (port 9999) filters
+        // inbound SMTP only. non_smtpd_milters covers locally-injected mail
+        // (e.g. cron, pipes) — spam filtering does not apply there, only signing.
+        r#"smtpd_milters = inet:127.0.0.1:8891, inet:spamass-milter:9999
+non_smtpd_milters = inet:127.0.0.1:8891
 milter_default_action = accept"#
             .to_string()
     } else {

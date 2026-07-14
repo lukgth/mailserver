@@ -252,6 +252,16 @@ pub async fn handle_form(
         return re_render("Invalid invite code.").await;
     }
 
+    // Validate password before consuming the invite code — a failed validation
+    // would permanently burn a single-use code with no rollback available.
+    if password != confirm_password {
+        return re_render("Passwords do not match.").await;
+    }
+    if password.len() < 8 {
+        return re_render("Password must be at least 8 characters.")
+            .await;
+    }
+
     let code_valid = state
         .blocking_db({
             let code = invite_code.clone();
@@ -262,15 +272,6 @@ pub async fn handle_form(
 
     if !code_valid {
         return re_render("Invalid or already used invite code.")
-            .await;
-    }
-
-    // Validate password
-    if password != confirm_password {
-        return re_render("Passwords do not match.").await;
-    }
-    if password.len() < 8 {
-        return re_render("Password must be at least 8 characters.")
             .await;
     }
 

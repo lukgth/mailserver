@@ -1,0 +1,115 @@
+worker_processes auto;
+error_log /var/log/nginx/error.log warn;
+pid /var/run/nginx.pid;
+
+events {
+    worker_connections 1024;
+}
+
+http {
+    # Docker's embedded DNS resolver — required for variable-based proxy_pass
+    # so nginx re-resolves hostnames on each request instead of caching the
+    # first resolution at startup (which breaks after container restart).
+    resolver 127.0.0.11 valid=10s;
+
+    include       /etc/nginx/mime.types;
+    default_type  application/octet-stream;
+
+    # WebSocket upgrade map
+    map $http_upgrade $connection_upgrade {
+        default upgrade;
+        ''      close;
+    }
+
+    log_format main '$remote_addr - $remote_user [$time_local] "$request" '
+                    '$status $body_bytes_sent "$http_referer" '
+                    '"$http_user_agent" "$http_x_forwarded_for"';
+    access_log /var/log/nginx/access.log main;
+
+    sendfile on;
+    keepalive_timeout 65;
+    client_max_body_size 50m;
+
+    # Rate limiting for login endpoints
+    limit_req_zone $binary_remote_addr zone=login:10m rate=5r/m;
+    # Rate limiting for quarantine actions
+    limit_req_zone $binary_remote_addr zone=quarantine:10m rate=10r/m;
+
+    # ── HTTP → HTTPS redirect ────────────────────────────────────────────
+    server {
+        listen 80;
+        server_name _;
+
+        # Let's Encrypt ACME challenge
+        location /.well-known/acme-challenge/ {
+            root /var/www/certbot;
+        }
+
+        location / {
+            return 301 https://$host$request_uri;
+        }
+    }
+
+    # ── HTTPS ────────────────────────────────────────────────────────────
+    server {
+        listen 443 ssl;
+        http2 on;
+        server_name _;
+
+        # TLS certificates — certbot stores at /etc/letsencrypt/live/<domain>/
+        # Self-signed certs are generated to the same path.
+        # ${NGINX_HOST} is substituted at container start by nginx:alpine envsubst.
+        ssl_certificate     /etc/letsencrypt/live/${NGINX_HOST}/fullchain.pem;
+        ssl_certificate_key /etc/letsencrypt/live/${NGINX_HOST}/privkey.pem;
+
+        # Modern TLS config
+        ssl_protocols TLSv1.2 TLSv1.3;
+        ssl_ciphers ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305;
+        ssl_prefer_server_ciphers on;
+        ssl_session_cache shared:SSL:10m;
+        ssl_session_timeout 1d;
+        ssl_session_tickets off;
+
+        # Security headers
+        add_header Strict-Transport-Security "max-age=63072000; includeSubDomains" always;
+        add_header X-Content-Type-Options nosniff;
+
+        # Rate limit login form
+        location = /login {
+            limit_req zone=login burst=3 nodelay;
+            set $backend "http://mailserver:8080";
+            proxy_pass $backend;
+            include /etc/nginx/proxy_params.conf;
+        }
+
+        # Rate limit registration
+        location = /register {
+            limit_req zone=login burst=3 nodelay;
+            set $backend "http://mailserver:8080";
+            proxy_pass $backend;
+            include /etc/nginx/proxy_params.conf;
+        }
+
+        # Rate limit quarantine actions
+        location /quarantine {
+            limit_req zone=quarantine burst=5 nodelay;
+            set $backend "http://mailserver:8080";
+            proxy_pass $backend;
+            include /etc/nginx/proxy_params.conf;
+        }
+
+        # Roundcube webmail
+        location /webmail/ {
+            set $backend "http://roundcube/";
+            proxy_pass $backend;
+            include /etc/nginx/proxy_params.conf;
+        }
+
+        # Everything else → mailserver
+        location / {
+            set $backend "http://mailserver:8080";
+            proxy_pass $backend;
+            include /etc/nginx/proxy_params.conf;
+        }
+    }
+}

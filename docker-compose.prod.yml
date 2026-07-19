@@ -85,6 +85,7 @@ services:
       - "443:443"
     environment:
       NGINX_HOST: ${HOSTNAME:-mail.example.com}
+      NGINX_ENVSUBST_FILTER: ^NGINX_HOST$
     volumes:
       - ./nginx/nginx.conf.template:/etc/nginx/templates/nginx.conf.template:ro
       - ./nginx/proxy_params.conf:/etc/nginx/proxy_params.conf:ro

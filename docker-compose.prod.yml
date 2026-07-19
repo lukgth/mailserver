@@ -145,7 +145,7 @@ services:
 
   # Roundcube webmail client
   roundcube:
-    image: roundcube/roundcubemail:1.6.16-fpm-alpine
+    image: roundcube/roundcubemail:1.6.16-apache
     depends_on:
       - mailserver
     environment:

@@ -9,6 +9,22 @@
         ''      close;
     }
 
+    # Map file extension to correct MIME type for Roundcube static assets
+    # Apache returns text/html for everything, so we override it at the proxy
+    map $uri $correct_type {
+        default           application/octet-stream;
+        ~\.css$           text/css;
+        ~\.js$            application/javascript;
+        ~\.png$           image/png;
+        ~\.jpe?g$         image/jpeg;
+        ~\.gif$           image/gif;
+        ~\.ico$           image/vnd.microsoft.icon;
+        ~\.svg$           image/svg+xml;
+        ~\.woff2?$        font/woff;
+        ~\.ttf$           font/ttf;
+        ~\.eot$           application/vnd.ms-fontobject;
+    }
+
     client_max_body_size 50m;
 
     # Rate limiting for login endpoints
@@ -85,6 +101,17 @@
             rewrite ^/webmail(/.*)$ $1 break;
             proxy_pass $backend;
             include /etc/nginx/proxy_params.conf;
+        }
+
+        # Roundcube static assets — force correct Content-Type
+        # (Apache/PHP returns text/html for everything)
+        location ~* ^/webmail/(.+)\.(css|js|png|jpg|jpeg|gif|ico|svg|woff|woff2|ttf|eot)$ {
+            set $backend "http://roundcube/";
+            rewrite ^/webmail(/.*)$ $1 break;
+            proxy_pass $backend;
+            include /etc/nginx/proxy_params.conf;
+            proxy_hide_header Content-Type;
+            add_header Content-Type $correct_type always;
         }
 
         # Everything else → mailserver

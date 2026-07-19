@@ -1,3 +1,5 @@
+Options +FollowSymLinks
+
 RewriteEngine On
 
 # Serve existing files and directories directly (CSS, JS, images, etc.)

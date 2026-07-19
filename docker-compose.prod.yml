@@ -91,6 +91,7 @@ services:
       - ./nginx/proxy_params.conf:/etc/nginx/proxy_params.conf:ro
       - ./nginx/certs:/etc/letsencrypt:ro
       - certbot-www:/var/www/certbot:ro
+      - roundcube-www:/var/www/roundcube:ro
     restart: unless-stopped
     networks:
       - internal
@@ -146,7 +147,7 @@ services:
 
   # Roundcube webmail client
   roundcube:
-    image: roundcube/roundcubemail:1.6.16-apache
+    image: roundcube/roundcubemail:1.6.16-fpm-alpine
     depends_on:
       - mailserver
     environment:
@@ -154,10 +155,9 @@ services:
       ROUNDCUBEMAIL_SKIN: elastic
       ROUNDCUBEMAIL_REQUEST_PATH: /webmail/
     volumes:
+      - roundcube-www:/var/www/html
       - roundcube-db:/var/roundcube/db
-      - ./roundcube/apache-static.conf:/etc/apache2/conf-enabled/zzz-roundcube-static.conf:ro
       - ./roundcube/config.inc.php:/var/roundcube/config/config.inc.php:ro
-    restart: unless-stopped
     networks:
       - internal
 
@@ -177,3 +177,4 @@ volumes:
   # Ephemeral — safe to remove on down
   certbot-www:
   roundcube-db:
+  roundcube-www:

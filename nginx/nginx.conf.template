@@ -79,26 +79,19 @@
             include /etc/nginx/proxy_params.conf;
         }
 
-        # Roundcube webmail via PHP-FPM
-        # Static files served directly from shared volume; PHP via FastCGI
+        # Roundcube — static files served directly from shared volume
         location /webmail/ {
             alias /var/www/roundcube/;
             index index.php;
+        }
 
-            # Static files — served directly by nginx
-            location ~* \.(css|js|png|jpg|jpeg|gif|ico|svg|woff2?|ttf|eot)$ {
-                expires 30d;
-                access_log off;
-            }
-
-            # PHP files via FastCGI to the fpm container
-            location ~ \.php$ {
-                fastcgi_pass roundcube:9000;
-                fastcgi_index index.php;
-                include fastcgi_params;
-                fastcgi_param SCRIPT_FILENAME /var/www/html$fastcgi_script_name;
-                fastcgi_param QUERY_STRING $query_string;
-            }
+        # Roundcube — PHP files via FastCGI (SCRIPT_FILENAME strips /webmail/ prefix)
+        location ~ ^/webmail/(.+)\.php$ {
+            fastcgi_pass roundcube:9000;
+            fastcgi_index index.php;
+            include fastcgi_params;
+            fastcgi_param SCRIPT_FILENAME /var/www/html/$1.php;
+            fastcgi_param QUERY_STRING $query_string;
         }
 
         # Everything else → mailserver

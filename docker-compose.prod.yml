@@ -155,6 +155,7 @@ services:
       ROUNDCUBEMAIL_REQUEST_PATH: /webmail/
     volumes:
       - roundcube-db:/var/roundcube/db
+      - ./roundcube/.htaccess:/var/www/html/.htaccess:ro
       - ./roundcube/config.inc.php:/var/roundcube/config/config.inc.php:ro
     restart: unless-stopped
     networks:

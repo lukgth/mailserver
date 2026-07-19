@@ -1,0 +1,9 @@
+RewriteEngine On
+
+# Serve existing files and directories directly (CSS, JS, images, etc.)
+RewriteCond %{REQUEST_FILENAME} !-f
+RewriteCond %{REQUEST_FILENAME} !-d
+RewriteRule ^(.*)$ index.php [L,QSA]
+
+# Keep favicon as direct file
+RewriteRule ^favicon\.ico$ - [L]

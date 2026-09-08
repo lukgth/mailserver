@@ -10,6 +10,7 @@ use axum::Router;
 use log::{debug, info, warn};
 use serde::Serialize;
 use std::collections::{HashMap, VecDeque};
+use std::net::{IpAddr, ToSocketAddrs};
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -53,8 +54,14 @@ pub const MCP_ANOMALY_CONSECUTIVE_FAILURES: u32 = 5;
 // ── MCP in-process guard (rate limiter + anomaly detector) ───────────────────
 
 /// Shared, in-memory guard for the MCP endpoint.
-/// Enforces sliding-window rate limits and detects anomalous patterns.
+/// Enforces per-key sliding-window rate limits and detects anomalous patterns.
 pub struct McpGuard {
+    /// Per-key rate-limit and anomaly state (60-second sliding window per key).
+    keys: HashMap<String, McpGuardState>,
+}
+
+/// Per-key rate-limit state.
+struct McpGuardState {
     /// Timestamps of all MCP calls in the last 60 seconds.
     call_times: VecDeque<Instant>,
     /// Timestamps of destructive tool calls in the last 60 seconds.
@@ -66,66 +73,96 @@ pub struct McpGuard {
 impl McpGuard {
     pub fn new() -> Self {
         Self {
+            keys: HashMap::new(),
+        }
+    }
+
+    /// Access (creating if needed) the state bucket for `key`.
+    fn state(&mut self, key: &str) -> &mut McpGuardState {
+        self.keys.entry(key.to_string()).or_insert_with(|| McpGuardState {
             call_times: VecDeque::new(),
             destructive_times: VecDeque::new(),
             consecutive_failures: 0,
-        }
+        })
     }
 
-    /// Return the current consecutive-failure count (for testing / diagnostics).
+    /// Return the current consecutive-failure count for `key` (for testing / diagnostics).
     #[allow(dead_code)]
-    pub fn consecutive_failures(&self) -> u32 {
-        self.consecutive_failures
+    pub fn consecutive_failures(&self, key: &str) -> u32 {
+        self.keys
+            .get(key)
+            .map(|s| s.consecutive_failures)
+            .unwrap_or(0)
     }
 
-    /// Evict entries outside the 60-second sliding window.
-    fn evict_old(&mut self) {
+    /// Evict entries outside the 60-second sliding window for `key`.
+    /// Drops the key entirely once its state is empty so short-lived keys do
+    /// not accumulate in the map.
+    fn evict_old(&mut self, key: &str) {
         let cutoff = Instant::now() - Duration::from_secs(60);
-        while self.call_times.front().map(|&t| t < cutoff).unwrap_or(false) {
-            self.call_times.pop_front();
-        }
-        while self.destructive_times.front().map(|&t| t < cutoff).unwrap_or(false) {
-            self.destructive_times.pop_front();
+        let empty = {
+            let Some(state) = self.keys.get_mut(key) else {
+                return;
+            };
+            while state.call_times.front().map(|&t| t < cutoff).unwrap_or(false) {
+                state.call_times.pop_front();
+            }
+            while state
+                .destructive_times
+                .front()
+                .map(|&t| t < cutoff)
+                .unwrap_or(false)
+            {
+                state.destructive_times.pop_front();
+            }
+            state.call_times.is_empty()
+                && state.destructive_times.is_empty()
+                && state.consecutive_failures == 0
+        };
+        if empty {
+            self.keys.remove(key);
         }
     }
 
-    /// Check rate limits and, if allowed, record the call.
+    /// Check rate limits for `key` and, if allowed, record the call.
     /// Returns `Some(reason)` if a limit is exceeded (call is NOT recorded).
     /// Returns `None` and records the timestamp if the call is allowed.
-    pub fn check_and_record(&mut self, is_destructive: bool) -> Option<String> {
-        self.evict_old();
-        if self.call_times.len() >= MCP_RATE_LIMIT_PER_MIN {
+    pub fn check_and_record(&mut self, key: &str, is_destructive: bool) -> Option<String> {
+        self.evict_old(key);
+        let state = self.state(key);
+        if state.call_times.len() >= MCP_RATE_LIMIT_PER_MIN {
             return Some(format!(
                 "Rate limit exceeded: more than {} MCP calls per minute",
                 MCP_RATE_LIMIT_PER_MIN
             ));
         }
-        if is_destructive && self.destructive_times.len() >= MCP_DESTRUCTIVE_RATE_LIMIT_PER_MIN {
+        if is_destructive && state.destructive_times.len() >= MCP_DESTRUCTIVE_RATE_LIMIT_PER_MIN {
             return Some(format!(
                 "Destructive rate limit exceeded: more than {} send/delete operations per minute",
                 MCP_DESTRUCTIVE_RATE_LIMIT_PER_MIN
             ));
         }
         let now = Instant::now();
-        self.call_times.push_back(now);
+        state.call_times.push_back(now);
         if is_destructive {
-            self.destructive_times.push_back(now);
+            state.destructive_times.push_back(now);
         }
         None
     }
 
-    /// Record the outcome of a processed call.
+    /// Record the outcome of a processed call for `key`.
     /// Returns `Some(reason)` if the consecutive-failure threshold is reached.
-    pub fn record_outcome(&mut self, success: bool) -> Option<String> {
+    pub fn record_outcome(&mut self, key: &str, success: bool) -> Option<String> {
+        let state = self.state(key);
         if success {
-            self.consecutive_failures = 0;
+            state.consecutive_failures = 0;
             None
         } else {
-            self.consecutive_failures += 1;
-            if self.consecutive_failures >= MCP_ANOMALY_CONSECUTIVE_FAILURES {
+            state.consecutive_failures += 1;
+            if state.consecutive_failures >= MCP_ANOMALY_CONSECUTIVE_FAILURES {
                 Some(format!(
                     "Anomaly detected: {} consecutive MCP call failures",
-                    self.consecutive_failures
+                    state.consecutive_failures
                 ))
             } else {
                 None
@@ -231,10 +268,50 @@ pub async fn csrf_middleware(
                 }
             }
         } else {
-            // No CSRF cookie — request is from a cookie-less client (API token,
-            // Basic auth, CalDAV, one-click unsubscribe). These cannot be targeted
-            // by CSRF attacks (same-origin cookies are the attack vector), so pass
-            // through without enforcing the token check.
+            // No CSRF cookie — request is from a cookie-less client. CSRF
+            // attacks work by making the browser attach same-origin cookies, so
+            // a request that carries no token cookie can only be exploited if
+            // it also needs no credentials the attacker lacks.
+            //
+            // 1. API/DAV clients authenticate via an Authorization header
+            //    (Basic/Bearer) instead of a cookie — not vulnerable to
+            //    cookie-based CSRF, pass through unchanged.
+            // 2. Public endpoints (registration, unsubscribe, pixel, BIMI,
+            //    autoconfig discovery, well-known) are reached without cookies
+            //    and do not mutate private state, pass through unchanged.
+            // 3. Every other cookie-less mutation is rejected: it can be
+            //    forged cross-origin with no cookie and no credentials.
+            let has_basic_or_bearer_auth = req
+                .headers()
+                .get(header::AUTHORIZATION)
+                .and_then(|v| v.to_str().ok())
+                .map(|v| {
+                    let scheme = v.trim_start().split_whitespace().next().unwrap_or("");
+                    scheme.eq_ignore_ascii_case("Basic")
+                        || scheme.eq_ignore_ascii_case("Bearer")
+                })
+                .unwrap_or(false);
+
+            if !has_basic_or_bearer_auth {
+                let path = req.uri().path();
+                const PUBLIC_PREFIXES: &[&str] = &[
+                    "/register",
+                    "/unsubscribe",
+                    "/pixel",
+                    "/bimi/",
+                    "/mail/config-v1.1.xml",
+                    "/.well-known/",
+                ];
+                let is_public = PUBLIC_PREFIXES.iter().any(|p| path.starts_with(p));
+                if !is_public {
+                    warn!(
+                        "[csrf] rejecting cookie-less mutation without credentials: {} {}",
+                        method, path
+                    );
+                    return (StatusCode::FORBIDDEN, "CSRF protection: missing CSRF token")
+                        .into_response();
+                }
+            }
         }
     }
 
@@ -437,6 +514,150 @@ pub(crate) async fn regen_configs(state: &AppState) {
     }
 }
 
+/// Validate a webhook/outbound URL for SSRF safety.
+///
+/// Rules:
+/// - Must parse as an absolute URL (`reqwest::Url`).
+/// - Scheme must be `https`. The only `http` URLs accepted are
+///   `http://127.0.0.1` and `http://localhost` (loopback, reserved for local
+///   testing/tooling).
+/// - The host must resolve via the system resolver; EVERY resolved address
+///   must be a public, routable address. Loopback, private (RFC 1918),
+///   link-local (169.254.0.0/16, fe80::/10), CGNAT (100.64.0.0/10),
+///   benchmarking (198.18.0.0/15), IPv6 ULA (fc00::/7), `::1`, IPv4-mapped
+///   variants and unspecified addresses are rejected.
+/// - Obfuscated IP literal host forms (pure-integer decimal such as
+///   `2130706433`, and `0x`/`0o`/`0b` hex/octal/binary literals) are rejected,
+///   as is any host containing characters other than `[A-Za-z0-9.-:]`.
+pub fn validate_outbound_url(url: &str) -> bool {
+    let Ok(parsed) = reqwest::Url::parse(url) else {
+        return false;
+    };
+    let Some(host) = parsed.host_str() else {
+        return false;
+    };
+    // Hosts must be plain DNS names, dotted IPv4 or colon-separated IPv6.
+    // Anything else (userinfo tricks, IDN escapes, etc.) is rejected.
+    if !host
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == ':')
+    {
+        return false;
+    }
+    if is_obfuscated_ip_literal(host) {
+        return false;
+    }
+
+    // Loopback exception: http://127.0.0.1 and http://localhost, used by
+    // tests and local tooling, bypass the address checks entirely.
+    let loopback_exception = host == "127.0.0.1" || host.eq_ignore_ascii_case("localhost")
+        || host == "::1";
+
+    if parsed.scheme() == "https" {
+        // falls through to address checks
+    } else if parsed.scheme() == "http" && loopback_exception {
+        return true;
+    } else {
+        return false;
+    }
+
+    // Resolve the host and reject if ANY resolved address is non-public
+    // (defends against DNS-rebinding style attacks).
+    let port = parsed.port().unwrap_or(443);
+    let Ok(addrs) = (host, port).to_socket_addrs() else {
+        return false;
+    };
+    for addr in addrs {
+        if ip_is_blocked(addr.ip()) {
+            return false;
+        }
+    }
+    true
+}
+
+/// True when `host` is an obfuscated IP literal (decimal/octal/hex/binary)
+/// that DNS might interpret as an address — e.g. `2130706433` (127.0.0.1),
+/// `0x7f000001`, `017700000001`.
+fn is_obfuscated_ip_literal(host: &str) -> bool {
+    // Pure decimal integer form.
+    if host.parse::<u128>().is_ok() {
+        return true;
+    }
+    // Hex/octal/binary integer forms — only when the whole host is a bare
+    // number (a dotted host is a domain name).
+    let rest = host
+        .strip_prefix("0x")
+        .or_else(|| host.strip_prefix("0X"))
+        .or_else(|| host.strip_prefix("0o"))
+        .or_else(|| host.strip_prefix("0O"))
+        .or_else(|| host.strip_prefix("0b"))
+        .or_else(|| host.strip_prefix("0B"));
+    let Some(rest) = rest else {
+        return false;
+    };
+    if rest.is_empty() || rest.contains('.') || rest.contains(':') {
+        return false;
+    }
+    match host.get(..2) {
+        Some("0x") | Some("0X") => rest.chars().all(|c| c.is_ascii_hexdigit()),
+        Some("0o") | Some("0O") => rest.chars().all(|c| matches!(c, '0'..='7')),
+        _ => rest.chars().all(|c| matches!(c, '0'..='1')),
+    }
+}
+
+/// True when `ip` is a non-public address that outbound HTTP must never reach.
+fn ip_is_blocked(ip: IpAddr) -> bool {
+    if ip.is_loopback() || ip.is_unspecified() {
+        return true;
+    }
+    match ip {
+        IpAddr::V4(v4) => {
+            if v4.is_private() || v4.is_link_local() {
+                return true;
+            }
+            let o = v4.octets();
+            // 100.64.0.0/10 — Carrier-Grade NAT (CGNAT)
+            if o[0] == 100 && (o[1] & 0xC0) == 0x40 {
+                return true;
+            }
+            // 198.18.0.0/15 — benchmarking range (RFC 2544)
+            if o[0] == 198 && (o[1] & 0xFE) == 0x12 {
+                return true;
+            }
+            false
+        }
+        IpAddr::V6(v6) => {
+            // IPv4-mapped IPv6 (::ffff:a.b.c.d) inherits the v4 rules.
+            if let Some(v4) = v6.to_ipv4_mapped() {
+                return ip_is_blocked(IpAddr::V4(v4));
+            }
+            let segs = v6.segments();
+            // fc00::/7 — unique local addresses (ULA)
+            if segs[0] & 0xFE00 == 0xFC00 {
+                return true;
+            }
+            // fe80::/10 — IPv6 link-local (IPv4 counterpart: 169.254.0.0/16)
+            if segs[0] & 0xFFC0 == 0xFE80 {
+                return true;
+            }
+            false
+        }
+    }
+}
+
+/// Truncate `s` to at most `max_len` bytes without splitting a UTF-8 char.
+fn truncate_utf8(s: &str, max_len: usize) -> String {
+    if s.len() <= max_len {
+        s.to_string()
+    } else {
+        let mut end = max_len;
+        while !s.is_char_boundary(end) {
+            end -= 1;
+        }
+        s[..end].to_string()
+    }
+}
+
 /// Fire a webhook notification for a system activity event.
 ///
 /// This sends a POST request with a JSON payload to the configured webhook URL.
@@ -459,19 +680,10 @@ pub(crate) fn fire_webhook(state: &AppState, event: &str, details: serde_json::V
             return;
         }
 
-        // Security: validate webhook URL
-        if !webhook_url.starts_with("https://") {
-            warn!("[webhook] rejecting non-HTTPS webhook URL: {}", webhook_url);
+        // Security: validate webhook URL (https-only, no internal/private targets)
+        if !validate_outbound_url(&webhook_url) {
+            warn!("[webhook] rejecting unsafe webhook URL: {}", webhook_url);
             return;
-        }
-        // Block internal IPs and localhost
-        let blocked = ["127.0.0.1", "localhost", "::1", "0.0.0.0", "10.", "172.16.", "172.17.", "172.18.", "172.19.", "172.20.", "172.21.", "172.22.", "172.23.", "172.24.", "172.25.", "172.26.", "172.27.", "172.28.", "172.29.", "172.30.", "172.31.", "192.168."];
-        let url_lower = webhook_url.to_lowercase();
-        for prefix in &blocked {
-            if url_lower.contains(prefix) {
-                warn!("[webhook] rejecting webhook URL pointing to internal address: {}", webhook_url);
-                return;
-            }
         }
 
         let timestamp = chrono::Utc::now().to_rfc3339();
@@ -487,21 +699,16 @@ pub(crate) fn fire_webhook(state: &AppState, event: &str, details: serde_json::V
 
         let (response_status, response_body, error) = match reqwest::blocking::Client::builder()
             .timeout(std::time::Duration::from_secs(10))
+            // Never follow redirects: a redirect target must satisfy the same
+            // SSRF checks as the original URL.
+            .redirect(reqwest::redirect::Policy::none())
             .build()
         {
             Ok(client) => match client.post(&webhook_url).json(&payload).send() {
                 Ok(resp) => {
                     let status = resp.status().as_u16() as i32;
                     let body = resp.text().unwrap_or_default();
-                    let body_truncated = if body.len() > 2048 {
-                        let mut end = 2048;
-                        while !body.is_char_boundary(end) {
-                            end -= 1;
-                        }
-                        body[..end].to_string()
-                    } else {
-                        body
-                    };
+                    let body_truncated = truncate_utf8(&body, 2048);
                     info!(
                         "[webhook] {} delivered to {} status={}",
                         event, webhook_url, status
@@ -542,17 +749,10 @@ pub(crate) fn fire_webhook(state: &AppState, event: &str, details: serde_json::V
 pub(crate) fn fire_webhook_with_db(db: &crate::db::Database, event: &str, details: serde_json::Value) {
     let webhook_url = db.get_setting("webhook_url").unwrap_or_default();
     if webhook_url.is_empty() { return; }
-    if !webhook_url.starts_with("https://") {
-        warn!("[webhook] rejecting non-HTTPS webhook URL: {}", webhook_url);
+    // Security: validate webhook URL (https-only, no internal/private targets)
+    if !validate_outbound_url(&webhook_url) {
+        warn!("[webhook] rejecting unsafe webhook URL: {}", webhook_url);
         return;
-    }
-    let blocked = ["127.0.0.1", "localhost", "::1", "0.0.0.0", "10.", "172.16.", "172.17.", "172.18.", "172.19.", "172.20.", "172.21.", "172.22.", "172.23.", "172.24.", "172.25.", "172.26.", "172.27.", "172.28.", "172.29.", "172.30.", "172.31.", "192.168."];
-    let url_lower = webhook_url.to_lowercase();
-    for prefix in &blocked {
-        if url_lower.contains(prefix) {
-            warn!("[webhook] rejecting webhook URL pointing to internal address: {}", webhook_url);
-            return;
-        }
     }
     let event = event.to_string();
     let timestamp = chrono::Utc::now().to_rfc3339();
@@ -561,13 +761,17 @@ pub(crate) fn fire_webhook_with_db(db: &crate::db::Database, event: &str, detail
     debug!("[webhook] firing {} to {}", event, webhook_url);
     let start = std::time::Instant::now();
     let (response_status, response_body, error) = match reqwest::blocking::Client::builder()
-        .timeout(std::time::Duration::from_secs(10)).build()
+        .timeout(std::time::Duration::from_secs(10))
+        // Never follow redirects: a redirect target must satisfy the same
+        // SSRF checks as the original URL.
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
     {
         Ok(client) => match client.post(&webhook_url).json(&payload).send() {
             Ok(resp) => {
                 let status = resp.status().as_u16() as i32;
                 let body = resp.text().unwrap_or_default();
-                let body_truncated = if body.len() > 2048 { body[..2048].to_string() } else { body };
+                let body_truncated = truncate_utf8(&body, 2048);
                 (status, body_truncated, String::new())
             }
             Err(e) => (-1, String::new(), e.to_string()),

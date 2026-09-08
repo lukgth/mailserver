@@ -96,20 +96,25 @@ fn clear_failures(ip: &IpAddr) {
     LOGIN_FAILURES.lock().unwrap().remove(ip);
 }
 
-/// Extract client IP from request headers (X-Forwarded-For, X-Real-IP) or socket address.
-fn get_client_ip(parts: &Parts) -> IpAddr {
-    // Check X-Forwarded-For (nginx sets this)
-    if let Some(forwarded) = parts.headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()) {
-        if let Some(first) = forwarded.split(',').next() {
-            if let Ok(ip) = first.trim().parse::<IpAddr>() {
-                return ip;
-            }
-        }
-    }
+/// Extract client IP from request headers (X-Real-IP, X-Forwarded-For) or socket address.
+///
+/// Trust order: X-Real-IP (set by the reverse proxy) → the LAST
+/// X-Forwarded-For entry (the hop appended by the most recent proxy) →
+/// socket address.
+pub(crate) fn get_client_ip(parts: &Parts) -> IpAddr {
     // Check X-Real-IP
     if let Some(real_ip) = parts.headers.get("x-real-ip").and_then(|v| v.to_str().ok()) {
         if let Ok(ip) = real_ip.trim().parse::<IpAddr>() {
             return ip;
+        }
+    }
+    // Check X-Forwarded-For; the last entry is the one most recently appended
+    // by a trusted proxy.
+    if let Some(forwarded) = parts.headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()) {
+        if let Some(last) = forwarded.split(',').next_back() {
+            if let Ok(ip) = last.trim().parse::<IpAddr>() {
+                return ip;
+            }
         }
     }
     // Fall back to socket address from Axum ConnectInfo extension

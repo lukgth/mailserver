@@ -64,8 +64,13 @@ fn soap_response(status: StatusCode, body: &str) -> Response {
         .into_response()
 }
 
-/// Return a SOAP 1.1 Fault inside an Envelope.
+/// Return a SOAP 1.1 Fault inside an Envelope (HTTP 500).
 fn soap_fault(code: &str, message: &str) -> Response {
+    soap_fault_with_status(StatusCode::INTERNAL_SERVER_ERROR, code, message)
+}
+
+/// Return a SOAP 1.1 Fault with an explicit HTTP status (e.g. 429 for rate limits).
+fn soap_fault_with_status(status: StatusCode, code: &str, message: &str) -> Response {
     let body = format!(
         r#"
     <soap:Fault>
@@ -75,7 +80,7 @@ fn soap_fault(code: &str, message: &str) -> Response {
         code = xml_escape(code),
         msg = xml_escape(message),
     );
-    soap_response(StatusCode::INTERNAL_SERVER_ERROR, &body)
+    soap_response(status, &body)
 }
 
 // ── Request parsing ───────────────────────────────────────────────────────────
@@ -571,6 +576,19 @@ async fn handle_send_email(
         None => return soap_fault("soap:Client", "Account not found"),
     };
 
+    // Daily send limit check, mirroring the REST API (POST /api/emails).
+    if state
+        .blocking_db(move |db| db.check_and_increment_send_limit(account_id))
+        .await
+        .is_err()
+    {
+        return soap_fault_with_status(
+            StatusCode::TOO_MANY_REQUESTS,
+            "soap:Client",
+            "Daily send limit reached",
+        );
+    }
+
     let domain = acct.domain_name.as_deref().unwrap_or("unknown");
     let email_addr = format!("{}@{}", acct.username, domain);
 
@@ -649,12 +667,19 @@ async fn handle_send_email(
         .and_then(|p| p.parse().ok())
         .unwrap_or(25);
 
-    match SmtpTransport::builder_dangerous("127.0.0.1")
-        .port(smtp_port)
-        .build()
-        .send(&email)
-    {
-        Ok(_) => {
+    // Send on a blocking thread: lettre's sync SmtpTransport blocks on socket
+    // I/O and must not run on the async executor. The email message is fully
+    // built above, before spawning.
+    let send_result = tokio::task::spawn_blocking(move || {
+        SmtpTransport::builder_dangerous("127.0.0.1")
+            .port(smtp_port)
+            .build()
+            .send(&email)
+    })
+    .await;
+
+    match send_result {
+        Ok(Ok(_)) => {
             info!("[soap] email sent to {}", to);
             let body = r#"
     <tns:SendEmailResponse>
@@ -662,7 +687,22 @@ async fn handle_send_email(
     </tns:SendEmailResponse>"#;
             soap_response(StatusCode::OK, body)
         }
-        Err(e) => soap_fault("soap:Server", &format!("SMTP error: {}", e)),
+        Ok(Err(e)) => {
+            // The message never left the box — revert the daily-send counter.
+            let _ = state
+                .blocking_db(move |db| db.refund_daily_send(account_id))
+                .await;
+            soap_fault("soap:Server", &format!("SMTP error: {}", e))
+        }
+        Err(join_err) => {
+            let _ = state
+                .blocking_db(move |db| db.refund_daily_send(account_id))
+                .await;
+            soap_fault(
+                "soap:Server",
+                &format!("SMTP send task failed: {}", join_err),
+            )
+        }
     }
 }
 

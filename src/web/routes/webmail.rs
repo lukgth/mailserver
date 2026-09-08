@@ -1,7 +1,7 @@
 use askama::Template;
 use axum::{
     extract::{Path, Query, State},
-    http::header,
+    http::{header, StatusCode},
     response::{
         sse::{Event, KeepAlive, Sse},
         Html, IntoResponse, Redirect, Response,
@@ -37,6 +37,9 @@ pub(crate) fn is_safe_folder(s: &str) -> bool {
 
 const MAILDIR_ROOT: &str = "/data/mail";
 const PAGE_SIZE: usize = 20;
+
+/// Maximum number of concurrent IMAP-IDLE (SSE) sessions per process.
+const MAX_IDLE_SESSIONS: usize = 64;
 
 pub(crate) fn maildir_path(domain: &str, username: &str) -> String {
     format!("{}/{}/{}/Maildir", MAILDIR_ROOT, domain, username)
@@ -1512,44 +1515,65 @@ pub async fn send_email(
                 .and_then(|p| p.parse().ok())
                 .unwrap_or(25);
 
+            // Render the message bytes before handing ownership of `email` to the
+            // blocking SMTP task; the .Sent copy uses these bytes afterwards.
+            let raw_bytes = email.formatted();
+
             send_log.push(format!("Connecting to SMTP server at 127.0.0.1:{}...", smtp_port));
             use lettre::{SmtpTransport, Transport};
             // builder_dangerous disables TLS — safe here because we connect to the
             // local Postfix instance on the loopback interface (same as filter.rs).
-            match SmtpTransport::builder_dangerous("127.0.0.1")
-                .port(smtp_port)
-                .build()
-                .send(&email)
-            {
+            // SMTP I/O is blocking; run it off the async executor.
+            let send_result = tokio::task::spawn_blocking(move || {
+                SmtpTransport::builder_dangerous("127.0.0.1")
+                    .port(smtp_port)
+                    .build()
+                    .send(&email)
+            })
+            .await;
+
+            let smtp_response = match send_result {
+                Ok(Ok(response)) => Ok(response),
+                Ok(Err(e)) => Err(e.to_string()),
+                Err(join_err) => Err(format!("SMTP send task failed: {}", join_err)),
+            };
+
+            match smtp_response {
                 Ok(response) => {
                     send_log.push(format!("SMTP response: {:?}", response));
                     send_log.push("Email sent successfully!".to_string());
                     info!("[web] email sent successfully to {}", form.to);
                     flash = Some("Email sent successfully!".to_string());
 
-                    let raw_bytes = email.formatted();
-                    let maildir_base = format!("/data/mail/{}/{}", domain, acct.username);
-                    let sent_dir = format!("{}/Maildir/.Sent/new", maildir_base);
-                    if let Err(e) = std::fs::create_dir_all(&sent_dir) {
-                        warn!("[web] failed to create .Sent/new dir: {}", e);
-                    } else {
-                        let ts = std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .map(|d| d.as_secs())
-                            .unwrap_or(0);
-                        let pid = std::process::id();
-                        let hostname = std::env::var("HOSTNAME").unwrap_or_else(|_| "localhost".into());
-                        let fname = format!(
-                            "{}.M{}P1.{},S={},W={}",
-                            ts, pid, hostname, raw_bytes.len(), raw_bytes.len() + 15,
+                    if !is_safe_path_component(domain) || !is_safe_path_component(&acct.username) {
+                        warn!(
+                            "[web] skipping .Sent copy: unsafe path component (domain={}, username={})",
+                            domain, acct.username
                         );
-                        let sent_path = format!("{}/{}", sent_dir, fname);
-                        match std::fs::write(&sent_path, &raw_bytes) {
-                            Ok(_) => {
-                                send_log.push(format!("Saved copy to Sent folder"));
-                            }
-                            Err(e) => {
-                                warn!("[web] failed to save .Sent copy: {}", e);
+                    } else {
+                        let maildir_base = format!("/data/mail/{}/{}", domain, acct.username);
+                        let sent_dir = format!("{}/Maildir/.Sent/new", maildir_base);
+                        if let Err(e) = std::fs::create_dir_all(&sent_dir) {
+                            warn!("[web] failed to create .Sent/new dir: {}", e);
+                        } else {
+                            let ts = std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .map(|d| d.as_secs())
+                                .unwrap_or(0);
+                            let pid = std::process::id();
+                            let hostname = std::env::var("HOSTNAME").unwrap_or_else(|_| "localhost".into());
+                            let fname = format!(
+                                "{}.M{}P1.{},S={},W={}",
+                                ts, pid, hostname, raw_bytes.len(), raw_bytes.len() + 15,
+                            );
+                            let sent_path = format!("{}/{}", sent_dir, fname);
+                            match std::fs::write(&sent_path, &raw_bytes) {
+                                Ok(_) => {
+                                    send_log.push(format!("Saved copy to Sent folder"));
+                                }
+                                Err(e) => {
+                                    warn!("[web] failed to save .Sent copy: {}", e);
+                                }
                             }
                         }
                     }
@@ -1558,6 +1582,12 @@ pub async fn send_email(
                     send_log.push(format!("SMTP error: {}", e));
                     error!("[web] failed to send email: {}", e);
                     flash = Some(format!("Failed to send email: {}", e));
+                    // Refund the daily send allowance — a failed send must not
+                    // consume quota.
+                    let refund_aid = acct.id;
+                    state
+                        .blocking_db(move |db| db.refund_daily_send(refund_aid))
+                        .await;
                 }
             }
 
@@ -1623,7 +1653,7 @@ pub async fn idle_stream(
     _auth: AuthAdmin,
     State(state): State<AppState>,
     Query(query): Query<ImapIdleQuery>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
     let account_id = query.account_id;
     let folder = if is_safe_folder(&query.folder) {
         query.folder.clone()
@@ -1645,7 +1675,7 @@ pub async fn idle_stream(
             warn!("[idle] account id={} not found", account_id);
             let (_, rx) = tokio::sync::mpsc::channel::<Result<Event, Infallible>>(1);
             let stream = ReceiverStream::new(rx);
-            return Sse::new(stream).keep_alive(KeepAlive::default());
+            return Sse::new(stream).keep_alive(KeepAlive::default()).into_response();
         }
     };
 
@@ -1656,10 +1686,28 @@ pub async fn idle_stream(
         );
         let (_, rx) = tokio::sync::mpsc::channel::<Result<Event, Infallible>>(1);
         let stream = ReceiverStream::new(rx);
-        return Sse::new(stream).keep_alive(KeepAlive::default());
+        return Sse::new(stream).keep_alive(KeepAlive::default()).into_response();
     }
 
     let maildir_base = maildir_path(&domain, &username);
+
+    // Cap concurrent sessions per process: reject with 429 when the registry
+    // is full so a flood of idle connections cannot exhaust file descriptors.
+    {
+        let reg = state.idle_registry.lock().unwrap();
+        if reg.len() >= MAX_IDLE_SESSIONS {
+            warn!(
+                "[idle] refusing session for {}@{}: limit of {} concurrent sessions reached",
+                username, domain, MAX_IDLE_SESSIONS
+            );
+            return (
+                StatusCode::TOO_MANY_REQUESTS,
+                "Too many active IMAP IDLE sessions",
+            )
+                .into_response();
+        }
+    }
+
     let session_id = uuid::Uuid::new_v4().to_string();
     let now = chrono::Utc::now();
     let now_ts = now.format("%Y-%m-%d %H:%M:%S UTC").to_string();
@@ -1713,7 +1761,15 @@ pub async fn idle_stream(
                 break;
             }
 
-            let count = count_new_messages(&maildir_base, &folder);
+            // count_new_messages does blocking filesystem I/O; keep it off the
+            // async executor. On task failure report 0 and keep polling.
+            let count = {
+                let base = maildir_base.clone();
+                let fld = folder.clone();
+                tokio::task::spawn_blocking(move || count_new_messages(&base, &fld))
+                    .await
+                    .unwrap_or(0)
+            };
 
             // Format timestamp before acquiring lock to minimise contention
             let ping_ts = chrono::Utc::now().format("%Y-%m-%d %H:%M:%S UTC").to_string();
@@ -1745,9 +1801,10 @@ pub async fn idle_stream(
         }
         info!("[idle] session {} closed", sid);
     });
-
     let stream = ReceiverStream::new(rx);
-    Sse::new(stream).keep_alive(KeepAlive::new().interval(Duration::from_secs(30)))
+    Sse::new(stream)
+        .keep_alive(KeepAlive::new().interval(Duration::from_secs(30)))
+        .into_response()
 }
 
 #[cfg(test)]

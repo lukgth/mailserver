@@ -391,20 +391,40 @@ pub async fn send_email(
         .and_then(|p| p.parse().ok())
         .unwrap_or(25);
 
-    match SmtpTransport::builder_dangerous("127.0.0.1")
-        .port(smtp_port)
-        .build()
-        .send(&email)
-    {
-        Ok(_) => {
+    // SMTP I/O is blocking; run it off the async executor.
+    let send_result = tokio::task::spawn_blocking(move || {
+        SmtpTransport::builder_dangerous("127.0.0.1")
+            .port(smtp_port)
+            .build()
+            .send(&email)
+    })
+    .await;
+
+    match send_result {
+        Ok(Ok(_)) => {
             info!("[api] email sent to {}", body.to);
             (StatusCode::OK, Json(json!({"status": "sent"}))).into_response()
         }
-        Err(e) => json_error(
-            StatusCode::BAD_GATEWAY,
-            &format!("SMTP error: {}", e),
-        )
-        .into_response(),
+        Ok(Err(e)) => {
+            // Refund the daily send allowance — a failed send must not
+            // consume quota.
+            state
+                .blocking_db(move |db| db.refund_daily_send(aid))
+                .await;
+            json_error(StatusCode::BAD_GATEWAY, &format!("SMTP error: {}", e)).into_response()
+        }
+        Err(join_err) => {
+            // Refund the daily send allowance — a failed send must not
+            // consume quota.
+            state
+                .blocking_db(move |db| db.refund_daily_send(aid))
+                .await;
+            json_error(
+                StatusCode::BAD_GATEWAY,
+                &format!("SMTP error: send task failed: {}", join_err),
+            )
+            .into_response()
+        }
     }
 }
 

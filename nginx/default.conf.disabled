@@ -1,0 +1,4 @@
+# Intentionally empty replacement for the stock nginx image's
+# /etc/nginx/conf.d/default.conf. Mounted read-only in docker-compose.prod.yml
+# so the image's default "Welcome to nginx" server cannot shadow the ACME
+# port-80 listener defined in nginx.conf.template.

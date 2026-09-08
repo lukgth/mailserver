@@ -16,7 +16,7 @@ YELLOW='\033[1;33m'
 NC='\033[0m'
 
 pass() { PASS=$((PASS + 1)); TOTAL=$((TOTAL + 1)); printf "${GREEN}  PASS${NC}  %s\n" "$1"; }
-fail() { FAIL=$((FAIL + 1)); TOTAL=$((TOTAL + 1)); printf "${RED}  FAIL${NC}  %s\n" "$1"; [ -n "$2" ] && printf "        %s\n" "$2"; }
+fail() { FAIL=$((FAIL + 1)); TOTAL=$((TOTAL + 1)); printf "${RED}  FAIL${NC}  %s\n" "$1"; [ -n "$2" ] && printf "        %s\n" "$2"; return 0; }
 skip() { TOTAL=$((TOTAL + 1)); printf "${YELLOW}  SKIP${NC}  %s\n" "$1"; }
 section() { echo ""; printf "${YELLOW}=== %s ===${NC}\n" "$1"; }
 

@@ -62,6 +62,11 @@ spec:
       labels:
         app: mailserver
     spec:
+      # runAsNonRoot is intentionally NOT set: the container writes /data as root
+      # (maildirs, DKIM keys, sqlite db) and entrypoint.sh chowns to vmail/opendkim.
+      # fsGroup 1000 gives the PVC a stable group for RBAC/quotas.
+      securityContext:
+        fsGroup: 1000
       containers:
         - name: mailserver
           # Intentionally uses `main` to track the latest published image.
@@ -134,6 +139,30 @@ spec:
             - name: http
               containerPort: 8080
               protocol: TCP
+          # Unauthenticated health route served by the admin dashboard.
+          readinessProbe:
+            httpGet:
+              path: /static/style.css
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /static/style.css
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
           volumeMounts:
             - name: maildata
               mountPath: /data
@@ -185,6 +214,8 @@ spec:
       port: 995
       targetPort: pop3s
       protocol: TCP
+    # Dashboard/webmail (port http/8080): prefer an ingress with TLS
+    # termination (e.g. cert-manager) over raw LoadBalancer exposure on 8080.
     - name: http
       port: 8080
       targetPort: http

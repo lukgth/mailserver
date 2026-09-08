@@ -27,7 +27,7 @@ services:
     environment:
       POSTGRES_DB: mailserver
       POSTGRES_USER: mailserver
-      POSTGRES_PASSWORD: ${DB_PASSWORD:-changeme}
+      POSTGRES_PASSWORD: "${DB_PASSWORD:?DB_PASSWORD required}"
     volumes:
       - maildb:/var/lib/postgresql/data
     restart: unless-stopped
@@ -48,7 +48,7 @@ services:
         condition: service_healthy
     env_file: .env
     environment:
-      DATABASE_URL: postgres://mailserver:${DB_PASSWORD:-changeme}@db/mailserver
+      DATABASE_URL: "postgres://mailserver:${DB_PASSWORD:?DB_PASSWORD required}@db/mailserver"
       HOSTNAME: ${HOSTNAME:-mail.example.com}
       ADMIN_PORT: "8080"
       PIXEL_BASE_URL: https://${HOSTNAME:-mail.example.com}/pixel?id=
@@ -86,18 +86,28 @@ services:
     environment:
       NGINX_HOST: ${HOSTNAME:-mail.example.com}
       NGINX_ENVSUBST_FILTER: ^NGINX_HOST$
+    # Polls for the certbot reload trigger on the shared maildata volume and
+    # reloads nginx in place when present (no Docker socket, no restart).
+    command: >
+      /bin/sh -c 'while :; do [ -f /data/ssl-reload-requested ] && nginx -s reload && rm -f /data/ssl-reload-requested; sleep 60; done & exec nginx -g "daemon off;"'
     volumes:
       - ./nginx/nginx.conf.template:/etc/nginx/templates/nginx.conf.template:ro
       - ./nginx/proxy_params.conf:/etc/nginx/proxy_params.conf:ro
+      # Neutralize the stock image's default.conf so it cannot shadow the ACME
+      # port-80 listener (see the default_server directive in nginx.conf.template).
+      - ./nginx/default.conf.disabled:/etc/nginx/conf.d/default.conf:ro
       - ./nginx/certs:/etc/letsencrypt:ro
       - certbot-www:/var/www/certbot:ro
       - roundcube-www:/var/www/roundcube:ro
+      - maildata:/data
     restart: unless-stopped
     networks:
       - internal
 
   # Let's Encrypt certbot — auto-renews TLS certificates every 12h.
-  # After renewal, copies certs to /data/ssl/ and restarts mailserver to reload Postfix/Dovecot.
+  # After renewal, copies certs to /data/ssl/ (consumed by Postfix/Dovecot) and
+  # writes a trigger file that the nginx container polls to reload its certs.
+  # No Docker socket access needed.
   certbot:
     image: certbot/certbot
     restart: unless-stopped
@@ -105,7 +115,6 @@ services:
       - certbot-www:/var/www/certbot
       - ./nginx/certs:/etc/letsencrypt
       - maildata:/data
-      - /var/run/docker.sock:/var/run/docker.sock:ro
     entrypoint: >
       /bin/sh -c 'trap exit TERM; while :;
       do
@@ -116,8 +125,8 @@ services:
           cp "/etc/letsencrypt/live/$${DOMAIN}/privkey.pem" /data/ssl/key.pem;
           chmod 600 /data/ssl/key.pem;
           chmod 644 /data/ssl/cert.pem;
-          echo "[certbot] certs renewed, restarting mailserver";
-          docker restart mailserver-mailserver-1 2>/dev/null || true;
+          echo "[certbot] certs refreshed, signaling nginx to reload";
+          touch /data/ssl-reload-requested;
         fi;
         sleep 12h &
         wait $${!};
@@ -154,9 +163,15 @@ services:
       ROUNDCUBEMAIL_DB_TYPE: sqlite
       ROUNDCUBEMAIL_SKIN: elastic
       ROUNDCUBEMAIL_REQUEST_PATH: /webmail/
+      # Stable encryption key (sessions/cookies). The image reads
+      # ROUNDCUBEMAIL_DES_KEY; when unset it generates a random key on first
+      # start and persists it inside the roundcube-www named volume.
+      ROUNDCUBEMAIL_DES_KEY: ${ROUNDCUBEMAIL_DES_KEY:-}
     volumes:
       - roundcube-www:/var/www/html
-      - ./roundcube/config.inc.php:/var/roundcube/config/config.inc.php
+      # SQLite DB lives here (image default DSNW: sqlite:////var/roundcube/db/sqlite.db)
+      - roundcube-db:/var/roundcube/db
+      - ./roundcube/config.inc.php:/var/roundcube/config/config.inc.php:ro
     networks:
       - internal
 

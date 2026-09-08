@@ -3,7 +3,7 @@ set -eu
 
 for v in SEED_PASS HOSTNAME DB_PASSWORD; do
   val=$(eval "echo \${${v}:-}")
-  if [ -z "$val" ] || echo "$val" | grep -Eq '^(admin|MUST-BE-CHANGED|YOUR_[A-Z_]+_HERE|mailserver)$'; then
+  if [ -z "$val" ] || echo "$val" | grep -Eq '^(admin|changeme|CHANGE_ME|MUST-BE-CHANGED|YOUR_[A-Z_]+_HERE|mailserver)$'; then
     echo "[entrypoint] FATAL: $v is missing or set to a default/placeholder value" >&2
     exit 1
   fi
@@ -49,8 +49,10 @@ chown -R vmail:vmail /data/mail
 chown -R opendkim:opendkim /data/dkim
 
 echo "[entrypoint] INFO: starting services"
-# Trap signals for clean container shutdown
-trap 'trap - TERM; kill 0' SIGTERM SIGINT SIGQUIT
+# Trap signals for clean container shutdown.
+# Run `postfix stop` first so qmgr flushes the queue and mail spool is clean
+# before killing the remaining processes.
+trap 'trap - TERM; postfix stop >/dev/null 2>&1 || true; kill 0' SIGTERM SIGINT SIGQUIT
 
 # Postfix and Dovecot log to stdout directly (via /dev/stdout)
 # tee duplicates output to /var/log/mail.log for fail2ban monitoring.

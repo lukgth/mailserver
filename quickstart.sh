@@ -111,7 +111,7 @@ echo "━━━━━━━━━━━━━━━━━━━━━━━━�
 echo "  ✓ Stack is running!"
 echo ""
 echo "  Dashboard:  https://$DOMAIN"
-echo "  Login:      admin / $(grep SEED_PASS .env | cut -d= -f2)"
+echo "  Login:      admin / see .env"
 echo ""
 echo "  Mail ports (direct):"
 echo "    SMTP:   25, 587 (submission), 465 (SMTPS)"

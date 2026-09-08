@@ -37,4 +37,9 @@ RUN chmod +x /entrypoint.sh \
     postconf compatibility_level=3.6
 EXPOSE 25 587 465 2525 143 993 110 995 8080
 VOLUME ["/data"]
+# curl is installed above. Probes an unauthenticated route of the admin dashboard.
+# ${ADMIN_PORT:-8080} is expanded at runtime by the shell (HEALTHCHECK CMD is not
+# subject to Dockerfile variable substitution).
+HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
+    CMD curl -fsS "http://127.0.0.1:${ADMIN_PORT:-8080}/static/style.css" || exit 1
 ENTRYPOINT ["/entrypoint.sh"]

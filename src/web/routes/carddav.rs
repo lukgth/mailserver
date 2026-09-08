@@ -12,6 +12,12 @@ use crate::web::auth::AuthAdmin;
 use crate::web::forms::CardDavAddressBookForm;
 use crate::web::AppState;
 
+// ── Limits ──
+
+const MAX_BODY_BYTES: usize = 4 * 1024 * 1024; // 4 MiB — matches axum's default body limit
+const MAX_ADDRESSBOOKS_PER_ACCOUNT: usize = 500;
+const MAX_OBJECTS_PER_ADDRESSBOOK: usize = 2000;
+
 // ── Admin Templates ──
 
 #[derive(Template)]
@@ -152,9 +158,21 @@ async fn authenticate_carddav_account(state: &AppState, headers: &HeaderMap) -> 
     let email = email.to_string();
     let password = password.to_string();
 
+    // Shared DAV account-password lockout — checked before any bcrypt work
+    if crate::web::routes::webdav::dav_auth::is_locked(&email) {
+        warn!("[carddav] rate limited auth attempt for {}", email);
+        return None;
+    }
+
+    let lookup_email = email.clone();
     let account = state
-        .blocking_db(move |db| db.get_account_by_email(&email))
-        .await?;
+        .blocking_db(move |db| db.get_account_by_email(&lookup_email))
+        .await;
+
+    let Some(account) = account else {
+        crate::web::routes::webdav::dav_auth::record_failure(&email);
+        return None;
+    };
 
     if !account.active {
         warn!("[carddav] account is inactive: {:?}", account.username);
@@ -162,8 +180,10 @@ async fn authenticate_carddav_account(state: &AppState, headers: &HeaderMap) -> 
     }
 
     if crate::auth::verify_password(&password, &account.password_hash) {
+        crate::web::routes::webdav::dav_auth::clear(&email);
         Some(account)
     } else {
+        crate::web::routes::webdav::dav_auth::record_failure(&email);
         warn!("[carddav] bad password for account: {:?}", account.username);
         None
     }
@@ -239,9 +259,24 @@ pub async fn protocol_handler(
         return StatusCode::FORBIDDEN.into_response();
     }
 
-    let body_bytes = axum::body::to_bytes(body, 4 * 1024 * 1024)
-        .await
-        .unwrap_or_default();
+    // Reject oversized uploads up front via Content-Length
+    if matches!(method.as_str(), "PUT" | "MKCOL") {
+        let too_large = headers
+            .get(header::CONTENT_LENGTH)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.parse::<u64>().ok())
+            .is_some_and(|len| len > MAX_BODY_BYTES as u64);
+        if too_large {
+            return (StatusCode::PAYLOAD_TOO_LARGE, "Body too large").into_response();
+        }
+    }
+
+    let body_bytes = match axum::body::to_bytes(body, MAX_BODY_BYTES).await {
+        Ok(b) => b,
+        Err(_) => {
+            return (StatusCode::PAYLOAD_TOO_LARGE, "Body too large").into_response();
+        }
+    };
 
     match method.as_str() {
         "OPTIONS" => handle_options(),
@@ -423,10 +458,30 @@ async fn handle_mkcol(
         }
     };
 
+    // Slugs are lowercased and restricted to [a-z0-9-_]
+    let slug = slug.to_lowercase();
+    let valid_slug = crate::web::routes::webmail::is_safe_path_component(&slug)
+        && slug
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_');
+    if !valid_slug {
+        warn!("[carddav] MKCOL rejected invalid slug: {}", slug);
+        return StatusCode::BAD_REQUEST.into_response();
+    }
+
+    // Cap addressbooks per owner
+    let account_id = account.id;
+    let ab_count = state
+        .blocking_db(move |db| db.list_carddav_addressbooks_for_account(account_id).len())
+        .await;
+    if ab_count >= MAX_ADDRESSBOOKS_PER_ACCOUNT {
+        return (StatusCode::INSUFFICIENT_STORAGE, "Address book limit reached").into_response();
+    }
+
+    // Try to extract display_name from MKCOL XML body
     let display_name = extract_displayname_from_xml(body).unwrap_or_else(|| slug.clone());
     let description = extract_description_from_xml(body).unwrap_or_default();
 
-    let account_id = account.id;
     let slug2 = slug.clone();
     let result = state
         .blocking_db(move |db| {
@@ -549,6 +604,28 @@ async fn handle_put(
         None => StatusCode::NOT_FOUND.into_response(),
         Some(ab) => {
             let ab_id = ab.id;
+
+            // Enforce the per-addressbook object cap only for brand-new
+            // objects; updates to existing objects always succeed.
+            let filename_cl = filename.clone();
+            let exists = state
+                .blocking_db(move |db| {
+                    db.get_carddav_object_by_filename(ab_id, &filename_cl).is_some()
+                })
+                .await;
+            if !exists {
+                let count = state
+                    .blocking_db(move |db| db.list_carddav_objects(ab_id).len())
+                    .await;
+                if count >= MAX_OBJECTS_PER_ADDRESSBOOK {
+                    return (
+                        StatusCode::INSUFFICIENT_STORAGE,
+                        "Address book object limit reached",
+                    )
+                        .into_response();
+                }
+            }
+
             let uid2 = uid.clone();
             let filename2 = filename.clone();
             let etag2 = etag.clone();

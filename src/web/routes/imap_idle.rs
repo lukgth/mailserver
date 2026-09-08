@@ -1,7 +1,7 @@
 use askama::Template;
 use axum::{
     extract::{Path, State},
-    http::HeaderMap,
+    http::{header, HeaderMap},
     response::{Html, IntoResponse, Redirect, Response},
 };
 use log::{info, warn};
@@ -56,8 +56,76 @@ fn format_duration(secs: i64) -> String {
     }
 }
 
+/// Validate that a mutating request originates from the same origin as the
+/// admin UI: parse the Origin (or Referer) URL and compare its host against
+/// the request's Host header. Requests carrying neither header are rejected
+/// so cross-site form posts cannot drive admin actions.
 fn same_origin(headers: &HeaderMap) -> bool {
-    headers.contains_key("referer") || headers.contains_key("origin")
+    let Some(expected_host) = headers
+        .get(header::HOST)
+        .and_then(|v| v.to_str().ok())
+        .map(host_from_header)
+    else {
+        return false;
+    };
+
+    let candidate = headers
+        .get(header::ORIGIN)
+        .and_then(|v| v.to_str().ok())
+        .or_else(|| {
+            headers
+                .get(header::REFERER)
+                .and_then(|v| v.to_str().ok())
+        });
+
+    match candidate {
+        Some(value) => match url_scheme_and_host(value) {
+            Some((scheme, host)) => {
+                (scheme == "http" || scheme == "https") && host == expected_host
+            }
+            None => false,
+        },
+        None => false,
+    }
+}
+
+/// Extract the lowercase host from an Origin or Referer URL value.
+/// Returns `None` when the value is not an absolute URL with a host.
+fn url_scheme_and_host(value: &str) -> Option<(&str, String)> {
+    let scheme_end = value.find("://")?;
+    let scheme = &value[..scheme_end];
+    let after = &value[scheme_end + 3..];
+    let raw_end = after.find(|c| c == '/' || c == '?' || c == '#').unwrap_or(after.len());
+    let raw = &after[..raw_end];
+    let host = if let Some(rest) = raw.strip_prefix('[') {
+        // IPv6 literal — keep the bracketed form, drop any port
+        match rest.find(']') {
+            Some(end) => &rest[..=end],
+            None => return None,
+        }
+    } else {
+        // Host:port — drop the port
+        match raw.find(':') {
+            Some(end) => &raw[..end],
+            None => raw,
+        }
+    };
+    if host.is_empty() {
+        return None;
+    }
+    Some((scheme, host.to_ascii_lowercase()))
+}
+
+/// Normalize a Host header value to a comparable lowercase host.
+fn host_from_header(value: &str) -> String {
+    let value = value.trim();
+    if let Some(rest) = value.strip_prefix('[') {
+        return match rest.find(']') {
+            Some(end) => value[..=end + 1].to_ascii_lowercase(),
+            None => value.to_ascii_lowercase(),
+        };
+    }
+    value.split(':').next().unwrap_or(value).to_ascii_lowercase()
 }
 
 // ── Handlers ──

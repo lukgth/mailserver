@@ -9,10 +9,137 @@ use axum::{
 use log::{error, info, warn};
 use quick_xml::events::{BytesDecl, BytesEnd, BytesStart, BytesText, Event};
 use quick_xml::Writer;
+use std::sync::LazyLock;
 
 use crate::web::auth::AuthAdmin;
 use crate::web::forms::WebDavSettingsForm;
 use crate::web::AppState;
+
+// ── DAV account-password rate limiting ──
+//
+// Shared lockout for WebDAV / CalDAV / CardDAV Basic auth: 5 failures for a
+// given account within 15 minutes triggers a 15-minute ban. Sibling modules
+// (caldav.rs, carddav.rs) reach it via
+// `crate::web::routes::webdav::dav_auth::{is_locked, record_failure, clear}`.
+
+pub mod dav_auth {
+    use log::warn;
+    use std::collections::HashMap;
+    use std::sync::{LazyLock, Mutex};
+    use std::time::{Duration, Instant};
+
+    const MAX_FAILURES: u32 = 5;
+    const WINDOW: Duration = Duration::from_secs(900); // 15 minutes
+    const BAN_DURATION: Duration = Duration::from_secs(900); // 15 min ban after exceeding
+    const MAX_ENTRIES: usize = 10_000;
+
+    struct FailureRecord {
+        count: u32,
+        first_at: Instant,
+        banned_until: Option<Instant>,
+    }
+
+    // ponytail: global lock is fine — DAV auth is low traffic
+    static FAILURES: LazyLock<Mutex<HashMap<String, FailureRecord>>> =
+        LazyLock::new(|| Mutex::new(HashMap::new()));
+
+    /// Returns true when `key` is currently banned or has hit the failure limit
+    /// inside the current window.
+    pub fn is_locked(key: &str) -> bool {
+        let mut map = FAILURES.lock().unwrap();
+        let now = Instant::now();
+        if let Some(rec) = map.get_mut(key) {
+            // If banned, check if the ban expired
+            if let Some(banned_until) = rec.banned_until {
+                if now < banned_until {
+                    return true;
+                }
+                // Ban expired — reset
+                map.remove(key);
+                return false;
+            }
+            // If outside the window, reset
+            if now.duration_since(rec.first_at) > WINDOW {
+                map.remove(key);
+                return false;
+            }
+            // Within window, check count
+            return rec.count >= MAX_FAILURES;
+        }
+        false
+    }
+
+    /// Record a failed authentication attempt for `key`.
+    pub fn record_failure(key: &str) {
+        let mut map = FAILURES.lock().unwrap();
+        let now = Instant::now();
+        match map.get_mut(key) {
+            Some(rec) => {
+                if now.duration_since(rec.first_at) > WINDOW {
+                    // Window expired, start fresh
+                    rec.count = 1;
+                    rec.first_at = now;
+                    rec.banned_until = None;
+                } else if rec.count >= MAX_FAILURES {
+                    // Already at limit, extend ban
+                    rec.banned_until = Some(now + BAN_DURATION);
+                } else {
+                    rec.count += 1;
+                    if rec.count >= MAX_FAILURES {
+                        rec.banned_until = Some(now + BAN_DURATION);
+                        warn!(
+                            "[dav] auth rate limit exceeded for {}; banned for {}s",
+                            key,
+                            BAN_DURATION.as_secs()
+                        );
+                    }
+                }
+            }
+            None => {
+                // Keep the map bounded: evict expired entries first, then the
+                // single oldest entry if we are still at capacity.
+                if map.len() >= MAX_ENTRIES {
+                    map.retain(|_, r| {
+                        let expired = r
+                            .banned_until
+                            .map_or(false, |b| b <= now)
+                            || now.duration_since(r.first_at) > WINDOW;
+                        !expired
+                    });
+                    if map.len() >= MAX_ENTRIES {
+                        if let Some(oldest) = map
+                            .iter()
+                            .min_by_key(|(_, r)| r.first_at)
+                            .map(|(k, _)| k.clone())
+                        {
+                            map.remove(&oldest);
+                        }
+                    }
+                }
+                map.insert(
+                    key.to_string(),
+                    FailureRecord {
+                        count: 1,
+                        first_at: now,
+                        banned_until: None,
+                    },
+                );
+            }
+        }
+    }
+
+    /// Clear any failure record for `key` after successful authentication.
+    pub fn clear(key: &str) {
+        FAILURES.lock().unwrap().remove(key);
+    }
+}
+
+// ── WebDAV storage directory ──
+
+// Serializes quota check → disk write → DB upsert so concurrent uploads cannot
+// exceed the per-owner quota (TOCTOU guard).
+static QUOTA_LOCK: LazyLock<tokio::sync::Mutex<()>> =
+    LazyLock::new(|| tokio::sync::Mutex::new(()));
 
 fn webdav_dir() -> &'static str {
     if std::path::Path::new("/var/mail").exists() {
@@ -134,34 +261,40 @@ fn parse_basic_auth(headers: &HeaderMap) -> Option<(String, String)> {
     Some((user.to_string(), pass.to_string()))
 }
 
+fn unauthorized_webdav() -> Response {
+    let mut resp = Response::new(Body::empty());
+    *resp.status_mut() = StatusCode::UNAUTHORIZED;
+    resp.headers_mut().insert(
+        header::WWW_AUTHENTICATE,
+        HeaderValue::from_static("Basic realm=\"WebDAV\""),
+    );
+    resp
+}
+
 fn require_webdav_auth(
     db: &crate::db::Database,
     headers: &HeaderMap,
 ) -> Result<(i64, String), Response> {
     let (email, password) = match parse_basic_auth(headers) {
         Some(creds) => creds,
-        None => {
-            let mut resp = Response::new(Body::empty());
-            *resp.status_mut() = StatusCode::UNAUTHORIZED;
-            resp.headers_mut().insert(
-                header::WWW_AUTHENTICATE,
-                HeaderValue::from_static("Basic realm=\"WebDAV\""),
-            );
-            return Err(resp);
-        }
+        None => return Err(unauthorized_webdav()),
     };
+
+    // Rate-limit account-password attempts before doing any bcrypt work
+    if dav_auth::is_locked(&email) {
+        warn!("[webdav] rate limited auth attempt for {}", email);
+        return Err(unauthorized_webdav());
+    }
+
     match db.get_account_for_webdav_auth(&email) {
         Some((account_id, hash)) if crate::auth::verify_password(&password, &hash) => {
+            dav_auth::clear(&email);
             Ok((account_id, email))
         }
         _ => {
-            let mut resp = Response::new(Body::empty());
-            *resp.status_mut() = StatusCode::UNAUTHORIZED;
-            resp.headers_mut().insert(
-                header::WWW_AUTHENTICATE,
-                HeaderValue::from_static("Basic realm=\"WebDAV\""),
-            );
-            Err(resp)
+            dav_auth::record_failure(&email);
+            warn!("[webdav] bad password for account: {}", email);
+            Err(unauthorized_webdav())
         }
     }
 }
@@ -513,6 +646,16 @@ pub async fn dav_handler(
                     .into_response();
             }
 
+            let content_type = headers
+                .get(header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("application/octet-stream")
+                .to_string();
+
+            // Serialize quota check → disk write → DB upsert so concurrent
+            // uploads cannot exceed the per-owner quota (TOCTOU guard).
+            let _quota_guard = QUOTA_LOCK.lock().await;
+
             // Check quota
             if quota_mb > 0 {
                 let owner_q = owner.clone();
@@ -523,12 +666,6 @@ pub async fn dav_handler(
                     return (StatusCode::INSUFFICIENT_STORAGE, "Quota exceeded").into_response();
                 }
             }
-
-            let content_type = headers
-                .get(header::CONTENT_TYPE)
-                .and_then(|v| v.to_str().ok())
-                .unwrap_or("application/octet-stream")
-                .to_string();
 
             if let Err(e) = ensure_webdav_dir() {
                 error!("[webdav] failed to create storage dir: {}", e);
@@ -688,7 +825,15 @@ pub async fn filelink_upload(
         .and_then(|v| v.parse::<i64>().ok())
         .unwrap_or(0);
 
-    while let Ok(Some(field)) = multipart.next_field().await {
+    let max_bytes = (max_size_mb * 1024 * 1024) as usize;
+
+    let mut field_count = 0usize;
+    while let Ok(Some(mut field)) = multipart.next_field().await {
+        field_count += 1;
+        if field_count > 10 {
+            return (StatusCode::PAYLOAD_TOO_LARGE, "Too many fields").into_response();
+        }
+
         let field_name = field.name().unwrap_or("").to_string();
         if field_name != "file" && field_name != "attachment" {
             continue;
@@ -700,17 +845,32 @@ pub async fn filelink_upload(
             .unwrap_or("application/octet-stream")
             .to_string();
 
-        let data = match field.bytes().await {
-            Ok(b) => b,
-            Err(e) => {
-                error!("[filelink] failed to read upload bytes: {}", e);
-                return (StatusCode::BAD_REQUEST, "Failed to read file").into_response();
+        // Stream the field in chunks, aborting with 413 as soon as the size
+        // limit is exceeded — never buffer an unbounded upload in memory.
+        let mut data: Vec<u8> = Vec::new();
+        let mut too_large = false;
+        loop {
+            let chunk = match field.chunk().await {
+                Ok(Some(c)) => c,
+                Ok(None) => break,
+                Err(e) => {
+                    error!("[filelink] failed to read upload chunk: {}", e);
+                    return (StatusCode::BAD_REQUEST, "Failed to read file").into_response();
+                }
+            };
+            if data.len() + chunk.len() > max_bytes {
+                too_large = true;
+                break;
             }
-        };
-
-        if data.len() as i64 > max_size_mb * 1024 * 1024 {
+            data.extend_from_slice(&chunk);
+        }
+        if too_large {
             return (StatusCode::PAYLOAD_TOO_LARGE, "File exceeds maximum size").into_response();
         }
+
+        // Serialize quota check → disk write → DB upsert so concurrent
+        // uploads cannot exceed the per-owner quota (TOCTOU guard).
+        let _quota_guard = QUOTA_LOCK.lock().await;
 
         if quota_mb > 0 {
             let owner_q = owner.clone();

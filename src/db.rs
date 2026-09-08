@@ -22,6 +22,26 @@ fn now() -> String {
     chrono::Utc::now().format("%Y-%m-%d %H:%M:%S").to_string()
 }
 
+/// Redact a secret for logging: keep the first 4 and last 4 characters.
+/// Values of 8 or fewer characters are fully masked rather than revealed.
+fn mask_secret(value: &str) -> String {
+    let chars: Vec<char> = value.chars().collect();
+    if chars.len() < 9 {
+        return "*".repeat(chars.len());
+    }
+    let head: String = chars[..4].iter().collect();
+    let tail: String = chars[chars.len() - 4..].iter().collect();
+    format!("{}...{}", head, tail)
+}
+
+/// Truncate a string to at most `max_chars` characters at a char boundary.
+fn truncate_to(s: &str, max_chars: usize) -> &str {
+    match s.char_indices().nth(max_chars) {
+        Some((idx, _)) => &s[..idx],
+        None => s,
+    }
+}
+
 fn generate_invite_code() -> String {
     use rand::Rng;
     let mut rng = rand::thread_rng();
@@ -40,7 +60,9 @@ pub struct Database {
 pub struct Admin {
     pub id: i64,
     pub username: String,
+    #[serde(skip_serializing)]
     pub password_hash: String,
+    #[serde(skip_serializing)]
     pub totp_secret: Option<String>,
     pub totp_enabled: bool,
 }
@@ -556,6 +578,7 @@ fn embedded_migrations() -> Vec<(String, String)> {
         ("019_bounce_inboxes".into(), include_str!("../migrations/019_bounce_inboxes.sql").into()),
         ("020_jmap".into(), include_str!("../migrations/020_jmap.sql").into()),
         ("021_invite_codes".into(), include_str!("../migrations/021_invite_codes.sql").into()),
+        ("025_jmap_token_expiry".into(), include_str!("../migrations/025_jmap_token_expiry.sql").into()),
     ];
     m.sort_by(|a, b| a.0.cmp(&b.0));
     m
@@ -828,15 +851,18 @@ impl Database {
         })
     }
 
-    pub fn update_admin_password(&self, id: i64, hash: &str) {
+    pub fn update_admin_password(&self, id: i64, hash: &str) -> Result<(), String> {
         info!("[db] updating admin password id={}", id);
         let mut conn = self.conn();
-        if let Err(e) = conn.execute(
+        conn.execute(
             "UPDATE admins SET password_hash = $1, updated_at = $2 WHERE id = $3",
             &[&hash, &now(), &id],
-        ) {
+        )
+        .map_err(|e| {
             error!("[db] failed to execute query: {}", e);
-        }
+            e.to_string()
+        })?;
+        Ok(())
     }
 
     pub fn update_admin_totp(&self, id: i64, secret: Option<&str>, enabled: bool) {
@@ -1026,7 +1052,10 @@ impl Database {
     }
 
     pub fn use_invite_code(&self, code: &str, used_by: &str) -> bool {
-        info!("[db] attempting to use invite code: {}", code);
+        info!(
+            "[db] attempting to use invite code: {}",
+            mask_secret(code)
+        );
         let mut conn = self.conn();
         let ts = now();
         let result = conn.execute(
@@ -1037,11 +1066,19 @@ impl Database {
         match result {
             Ok(n) => {
                 let used = n > 0;
-                info!("[db] invite code {} used={}", code, used);
+                info!(
+                    "[db] invite code {} used={}",
+                    mask_secret(code),
+                    used
+                );
                 used
             }
             Err(e) => {
-                error!("[db] failed to use invite code {}: {}", code, e);
+                error!(
+                    "[db] failed to use invite code {}: {}",
+                    mask_secret(code),
+                    e
+                );
                 false
             }
         }
@@ -1294,21 +1331,63 @@ impl Database {
                 error!("[db] failed to execute query: {}", e);
                 return;
             }
+            // Password change revokes all JMAP tokens issued to this account.
+            if let Err(e) = conn.execute("DELETE FROM jmap_tokens WHERE account_id = $1", &[&id]) {
+                error!("[db] failed to revoke JMAP tokens for account id={}: {}", id, e);
+            }
         }
     }
 
-    pub fn delete_account(&self, id: i64) {
+    pub fn delete_account(&self, id: i64) -> Result<bool, String> {
         warn!("[db] deleting account id={}", id);
         let _account_info = self.get_account_with_domain(id);
-        {
-            let mut conn = self.conn();
-            if let Err(e) = conn.execute("DELETE FROM accounts WHERE id = $1", &[&id]) {
-                error!("[db] failed to execute query: {}", e);
-                return;
-            }
+        let mut conn = self.conn();
+
+        // Refuse to delete accounts that back a DMARC/abuse/bounce inbox.
+        let referenced: bool = conn
+            .query_one(
+                "SELECT EXISTS (SELECT 1 FROM dmarc_inboxes WHERE account_id = $1)
+                        OR EXISTS (SELECT 1 FROM abuse_inboxes WHERE account_id = $1)
+                        OR EXISTS (SELECT 1 FROM bounce_inboxes WHERE account_id = $1)",
+                &[&id],
+            )
+            .map_err(|e| format!("failed to check account references: {}", e))?
+            .get(0);
+        if referenced {
+            return Ok(false);
         }
+
+        conn.execute("DELETE FROM accounts WHERE id = $1", &[&id]).map_err(|e| {
+            error!("[db] failed to execute query: {}", e);
+            format!("failed to delete account: {}", e)
+        })?;
+
         // Clean up any invite codes that referenced this account
         self.cleanup_used_invite_codes();
+        Ok(true)
+    }
+
+    pub fn username_exists(&self, domain_id: i64, username: &str) -> bool {
+        let mut conn = self.conn();
+        let count: i64 = conn
+            .query_one(
+                "SELECT COUNT(*) FROM accounts WHERE domain_id = $1 AND LOWER(username) = LOWER($2)",
+                &[&domain_id, &username],
+            )
+            .map(|row| row.get(0))
+            .unwrap_or(0);
+        count > 0
+    }
+
+    pub fn tracked_message_exists(&self, message_id: &str) -> bool {
+        let mut conn = self.conn();
+        conn.query_opt(
+            "SELECT id FROM tracked_messages WHERE message_id = $1",
+            &[&message_id],
+        )
+        .ok()
+        .flatten()
+        .is_some()
     }
 
     pub fn list_all_accounts_with_domain(&self) -> Vec<Account> {
@@ -2320,6 +2399,38 @@ impl Database {
         Ok(())
     }
 
+    /// Refund one daily send for an account (e.g. after a delivery failure),
+    /// flooring the counter at 0.
+    pub fn refund_daily_send(&self, account_id: i64) {
+        let mut conn = self.conn();
+        conn.execute(
+            "UPDATE accounts SET daily_send_count = GREATEST(daily_send_count - 1, 0) WHERE id = $1",
+            &[&account_id],
+        )
+        .ok();
+    }
+
+    /// Delete rows older than 30 days from the retention-bound audit tables.
+    pub fn purge_expired_rows(&self) {
+        let cutoff = (chrono::Utc::now() - chrono::Duration::days(30))
+            .format("%Y-%m-%d %H:%M:%S")
+            .to_string();
+        let mut conn = self.conn();
+        // Table/column names are fixed constants; there is no injection surface here.
+        for (table, column) in [
+            ("pixel_opens", "opened_at"),
+            ("webhook_logs", "created_at"),
+            ("mcp_logs", "created_at"),
+            ("fail2ban_log", "created_at"),
+        ] {
+            let sql = format!("DELETE FROM {} WHERE {} < $1", table, column);
+            match conn.execute(&sql, &[&cutoff]) {
+                Ok(n) => info!("[db] purged {} expired rows from {}", n, table),
+                Err(e) => error!("[db] failed to purge {}: {}", table, e),
+            }
+        }
+    }
+
     pub fn get_stats(&self) -> Stats {
         debug!("[db] fetching aggregate stats");
         let mut conn = self.conn();
@@ -2822,7 +2933,10 @@ impl Database {
     }
 
     pub fn get_unsubscribe_by_token(&self, token: &str) -> Option<(String, String)> {
-        debug!("[db] looking up unsubscribe token={}", token);
+        debug!(
+            "[db] looking up unsubscribe token={}",
+            mask_secret(token)
+        );
         let mut conn = self.conn();
         conn.query_opt(
             "SELECT recipient_email, sender_domain FROM unsubscribe_tokens WHERE token = $1",
@@ -2973,6 +3087,9 @@ impl Database {
     ) {
         debug!("[db] logging webhook execution url={}", url);
         let mut conn = self.conn();
+        // Cap stored bodies to keep the log table from ballooning.
+        let request_body = truncate_to(request_body, 1024);
+        let response_body = truncate_to(response_body, 1024);
         if let Err(e) = conn.execute(
             "INSERT INTO webhook_logs (url, request_body, response_status, response_body, error, duration_ms, sender, subject, created_at)
              VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
@@ -3690,7 +3807,10 @@ impl Database {
     }
 
     pub fn get_webdav_file_by_token(&self, token: &str) -> Option<WebDavFile> {
-        debug!("[db] getting webdav file by token={}", token);
+        debug!(
+            "[db] getting webdav file by token={}",
+            mask_secret(token)
+        );
         let mut conn = self.conn();
         conn.query_opt(
             "SELECT id, account_id, owner, filename, content_type, size, token, created_at, updated_at
@@ -3902,9 +4022,12 @@ impl Database {
 
     pub fn create_jmap_token(&self, account_id: i64, token: &str, created_at: &str) {
         debug!("[db] creating JMAP token for account_id={}", account_id);
+        let expires_at = (chrono::Utc::now() + chrono::Duration::days(30))
+            .format("%Y-%m-%d %H:%M:%S")
+            .to_string();
         if let Err(e) = self.conn().execute(
-            "INSERT INTO jmap_tokens (account_id, token, created_at) VALUES ($1, $2, $3)",
-            &[&account_id, &token, &created_at],
+            "INSERT INTO jmap_tokens (account_id, token, created_at, expires_at) VALUES ($1, $2, $3, $4)",
+            &[&account_id, &token, &created_at, &expires_at],
         ) {
             error!("[db] failed to create JMAP token: {}", e);
         }
@@ -3918,8 +4041,11 @@ impl Database {
              FROM jmap_tokens t
              JOIN accounts a ON a.id = t.account_id
              JOIN domains d ON d.id = a.domain_id
-             WHERE t.token = $1",
-            &[&token],
+             WHERE t.token = $1
+               AND a.active = TRUE
+               AND d.active = TRUE
+               AND (t.expires_at IS NULL OR t.expires_at > $2)",
+            &[&token, &now()],
         )
         .ok()
         .flatten()

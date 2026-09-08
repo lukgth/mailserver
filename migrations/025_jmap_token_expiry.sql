@@ -1,0 +1,1 @@
+ALTER TABLE jmap_tokens ADD COLUMN IF NOT EXISTS expires_at TEXT;

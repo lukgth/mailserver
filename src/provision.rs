@@ -7,6 +7,7 @@
 
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use log::{error, info, warn};
+use sha2::{Digest, Sha256};
 use russh::client;
 use russh::client::AuthResult;
 use russh::keys::{PrivateKey, PrivateKeyWithHashAlg};
@@ -33,9 +34,26 @@ impl CmdResult {
 }
 // ── SSH Handler ───────────────────────────────────────────────────────────────
 
-/// Minimal russh client handler. Accepts all host keys (users are expected to
-/// verify the host key fingerprint printed to the log before trusting the remote).
-pub(crate) struct SshHandler;
+/// russh client handler with host-key verification.
+///
+/// On connect the server's SHA-256 host key fingerprint is printed. The key is
+/// then verified against a known_hosts-style file (default:
+/// `/etc/mailserver/known_hosts`, override with `PROVISION_KNOWN_HOSTS`):
+/// * a matching entry → accepted;
+/// * no entry for the host → accepted **only** if the operator opted in with
+///   `--accept-new-host-key` / `PROVISION_ACCEPT_NEW_HOSTS=1`, in which case
+///   the key is persisted to the known_hosts file;
+/// * a differing entry → hard rejection.
+pub(crate) struct SshHandler {
+    /// Host name/IP used to look up the entry in the known_hosts file.
+    host: String,
+    /// SSH port (used for `[host]:port` known_hosts entries).
+    port: u16,
+    /// Path of the known_hosts-style file to check against / persist to.
+    known_hosts: PathBuf,
+    /// Accept and persist a previously unknown host key.
+    accept_new: bool,
+}
 
 impl client::Handler for SshHandler {
     type Error = russh::Error;
@@ -44,12 +62,93 @@ impl client::Handler for SshHandler {
         &mut self,
         server_public_key: &russh::keys::PublicKey,
     ) -> Result<bool, Self::Error> {
+        // SHA-256 fingerprint over the OpenSSH wire blob of the key
+        // (string(algorithm) || string(key data)) — the same digest that
+        // `ssh-keygen -lf` prints for a host key.
+        let fingerprint = match server_public_key.to_bytes() {
+            Ok(wire_bytes) => {
+                let digest = Sha256::digest(&wire_bytes);
+                BASE64.encode(digest)
+            }
+            Err(e) => {
+                error!(
+                    "[provision] cannot serialize server public key for fingerprinting: {}",
+                    e
+                );
+                return Ok(false);
+            }
+        };
+
         info!(
-            "[provision] remote host key algorithm: {}",
+            "[provision] remote host key fingerprint: SHA256:{} (algorithm {})",
+            fingerprint,
             server_public_key.algorithm()
         );
-        info!("[provision] accepting host key — verify algorithm/fingerprint above if this is your first connection");
-        Ok(true)
+
+        match russh::keys::check_known_hosts_path(
+            &self.host,
+            self.port,
+            server_public_key,
+            &self.known_hosts,
+        ) {
+            Ok(true) => {
+                info!(
+                    "[provision] host key matches known_hosts entry in {}",
+                    self.known_hosts.display()
+                );
+                Ok(true)
+            }
+            Ok(false) => {
+                // No recorded key for this host (or no known_hosts file yet).
+                if self.accept_new {
+                    match russh::keys::known_hosts::learn_known_hosts_path(
+                        &self.host,
+                        self.port,
+                        server_public_key,
+                        &self.known_hosts,
+                    ) {
+                        Ok(()) => {
+                            info!(
+                                "[provision] accepted and recorded new host key in {}",
+                                self.known_hosts.display()
+                            );
+                            Ok(true)
+                        }
+                        Err(e) => {
+                            error!(
+                                "[provision] cannot persist host key to {}: {}",
+                                self.known_hosts.display(),
+                                e
+                            );
+                            Ok(false)
+                        }
+                    }
+                } else {
+                    error!(
+                        "[provision] REJECTED: no known_hosts entry for {}:{} and the host key was not explicitly accepted.",
+                        self.host, self.port
+                    );
+                    error!(
+                        "[provision] compare the fingerprint above (SHA256:{}) against the server's real key, then re-run with --accept-new-host-key (or PROVISION_ACCEPT_NEW_HOSTS=1) to trust it.",
+                        fingerprint
+                    );
+                    Ok(false)
+                }
+            }
+            Err(e) => {
+                // A known_hosts entry exists for this host but the key differs.
+                error!(
+                    "[provision] REJECTED: host key MISMATCH against {}: {}",
+                    self.known_hosts.display(),
+                    e
+                );
+                error!(
+                    "[provision] got SHA256:{} — remove the stale entry (ssh-keygen -R {}:{}) only if you are sure the server's key legitimately changed.",
+                    fingerprint, self.host, self.port
+                );
+                Ok(false)
+            }
+        }
     }
 }
 
@@ -152,6 +251,13 @@ struct Params {
     password: Option<String>,
     /// Optional path to a env-file that will be uploaded to /etc/mailserver/env
     env_file: Option<PathBuf>,
+    /// Path of the known_hosts-style file used for host-key verification.
+    /// Defaults to `/etc/mailserver/known_hosts`; override with
+    /// `PROVISION_KNOWN_HOSTS`.
+    known_hosts: PathBuf,
+    /// Accept and persist a host key that has no known_hosts entry
+    /// (`--accept-new-host-key` or `PROVISION_ACCEPT_NEW_HOSTS=1`).
+    accept_new_host_key: bool,
 }
 
 fn parse_args(args: &[String]) -> Result<Params, String> {
@@ -161,6 +267,7 @@ fn parse_args(args: &[String]) -> Result<Params, String> {
     let mut key_path = None;
     let mut password = None;
     let mut env_file = None;
+    let mut accept_new_host_key = false;
 
     let mut i = 0;
     while i < args.len() {
@@ -188,12 +295,16 @@ fn parse_args(args: &[String]) -> Result<Params, String> {
             }
             "--password" => {
                 i += 1;
+                warn!("[provision] --password is visible in the process list; prefer PROVISION_SSH_PASSWORD or the interactive prompt");
                 password = Some(args.get(i).ok_or("--password requires a value")?.clone());
             }
             "--env-file" => {
                 i += 1;
                 let v = args.get(i).ok_or("--env-file requires a path")?;
                 env_file = Some(PathBuf::from(v));
+            }
+            "--accept-new-host-key" => {
+                accept_new_host_key = true;
             }
             other => {
                 return Err(format!("unknown argument: {}", other));
@@ -209,7 +320,31 @@ fn parse_args(args: &[String]) -> Result<Params, String> {
         key_path,
         password,
         env_file,
+        known_hosts: PathBuf::from("/etc/mailserver/known_hosts"),
+        accept_new_host_key,
     })
+}
+
+/// Prompt for the SSH password on stdin.
+///
+/// The input is echoed (no termios no-echo manipulation is performed); for
+/// unattended or higher-security runs use `PROVISION_SSH_PASSWORD` instead.
+/// Returns `None` on EOF or empty input, in which case authentication proceeds
+/// with the key only.
+fn prompt_password() -> Option<String> {
+    eprint!("[provision] SSH password (may be a key passphrase): ");
+    let mut line = String::new();
+    match std::io::stdin().read_line(&mut line) {
+        Ok(0) | Err(_) => None,
+        Ok(_) => {
+            let pwd = line.trim_end_matches(['\r', '\n']).to_string();
+            if pwd.is_empty() {
+                None
+            } else {
+                Some(pwd)
+            }
+        }
+    }
 }
 
 // ── Entry Point ───────────────────────────────────────────────────────────────
@@ -217,7 +352,7 @@ fn parse_args(args: &[String]) -> Result<Params, String> {
 /// Run the `provision` command.  `args` is the slice of CLI arguments that
 /// follow the `provision` subcommand token.
 pub async fn run(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
-    let params = match parse_args(args) {
+    let mut params = match parse_args(args) {
         Ok(p) => p,
         Err(e) => {
             eprintln!("provision: {}", e);
@@ -226,6 +361,30 @@ pub async fn run(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
             std::process::exit(1);
         }
     };
+
+    // Environment-driven overrides for host-key policy.
+    if std::env::var("PROVISION_ACCEPT_NEW_HOSTS").as_deref() == Ok("1") {
+        params.accept_new_host_key = true;
+    }
+    if let Ok(path) = std::env::var("PROVISION_KNOWN_HOSTS") {
+        if !path.is_empty() {
+            params.known_hosts = PathBuf::from(path);
+        }
+    }
+
+    // Password preference: CLI flag (discouraged) > PROVISION_SSH_PASSWORD >
+    // stdin prompt.
+    if params.password.is_none() {
+        if let Ok(pwd) = std::env::var("PROVISION_SSH_PASSWORD") {
+            if !pwd.is_empty() {
+                params.password = Some(pwd);
+                info!("[provision] using PROVISION_SSH_PASSWORD for authentication");
+            }
+        }
+    }
+    if params.password.is_none() {
+        params.password = prompt_password();
+    }
 
     info!(
         "[provision] connecting to {}:{} as user '{}'",
@@ -295,7 +454,17 @@ async fn connect_ssh(
     let config = Arc::new(client::Config::default());
     let addr = (params.host.as_str(), params.port);
 
-    let mut session = client::connect(config, addr, SshHandler).await?;
+    let mut session = client::connect(
+        config,
+        addr,
+        SshHandler {
+            host: params.host.clone(),
+            port: params.port,
+            known_hosts: params.known_hosts.clone(),
+            accept_new: params.accept_new_host_key,
+        },
+    )
+    .await?;
 
     // Try public-key authentication first
     let mut authed = false;
@@ -364,6 +533,33 @@ fn load_key(path: &Path, password: Option<&str>) -> Result<PrivateKey, Box<dyn s
 
 }
 
+/// Maximum number of bytes captured per stream (stdout / stderr) before the
+/// capture is truncated with a marker. Remote commands are trusted-ish but may
+/// legitimately produce huge output (e.g. a verbose `apt-get`); unbounded
+/// capture would let a misbehaving remote exhaust local memory.
+const MAX_CAPTURE: usize = 1024 * 1024;
+const TRUNC_MARKER: &str = "\n...[truncated: output exceeds 1 MiB]";
+
+/// Append `data` to `target`, capping `target` at `MAX_CAPTURE` bytes; when
+/// the cap is hit a truncation marker is appended once.
+fn push_capped(target: &mut String, data: &[u8]) {
+    let text = String::from_utf8_lossy(data);
+    let remaining = MAX_CAPTURE.saturating_sub(target.len());
+    if remaining == 0 {
+        // Marker was already appended when the cap was hit; drop further data.
+        return;
+    }
+    if text.len() <= remaining {
+        target.push_str(&text);
+    } else {
+        // `floor_char_boundary` keeps the cut at a UTF-8 boundary so we never
+        // truncate mid-character.
+        let end = text.floor_char_boundary(remaining);
+        target.push_str(&text[..end]);
+        target.push_str(TRUNC_MARKER);
+    }
+}
+
 /// Execute a single command on the remote host and collect stdout/stderr.
 async fn exec(
     session: &mut client::Handle<SshHandler>,
@@ -379,10 +575,10 @@ async fn exec(
     loop {
         match channel.wait().await {
             Some(ChannelMsg::Data { data }) => {
-                stdout.push_str(&String::from_utf8_lossy(&data));
+                push_capped(&mut stdout, &data);
             }
             Some(ChannelMsg::ExtendedData { data, .. }) => {
-                stderr.push_str(&String::from_utf8_lossy(&data));
+                push_capped(&mut stderr, &data);
             }
             Some(ChannelMsg::ExitStatus { exit_status }) => {
                 exit_code = exit_status as i32;
@@ -399,13 +595,58 @@ async fn exec(
     })
 }
 
-/// Execute a command and log stdout/stderr at debug/warn level.
-/// Returns the exit code.
+#[cfg(test)]
+mod capture_limit_tests {
+    use super::*;
+
+    #[test]
+    fn keeps_output_under_cap_with_marker() {
+        let mut target = String::new();
+        push_capped(&mut target, &[b'a'; MAX_CAPTURE]);
+        assert_eq!(target.len(), MAX_CAPTURE);
+
+        // Further data is dropped; the marker is added only once (on the push
+        // that crossed the cap), so the capture never grows unbounded.
+        push_capped(&mut target, &[b'b'; 4096]);
+        assert_eq!(target.len(), MAX_CAPTURE);
+    }
+
+    #[test]
+    fn appends_marker_when_data_crosses_cap() {
+        let mut target = String::new();
+        // 3 bytes over the cap.
+        push_capped(&mut target, &[b'a'; MAX_CAPTURE + 3]);
+        assert!(target.ends_with(TRUNC_MARKER));
+        assert_eq!(target.len(), MAX_CAPTURE + TRUNC_MARKER.len());
+        // Marker still present (not duplicated) after more data.
+        push_capped(&mut target, b"more");
+        assert!(target.ends_with(TRUNC_MARKER));
+    }
+
+    #[test]
+    fn never_truncates_mid_utf8_character() {
+        let mut target = String::new();
+        // "é" is 2 bytes; the cap cut must land on a char boundary.
+        push_capped(&mut target, "é".repeat(MAX_CAPTURE / 2 + 1).as_bytes());
+        assert!(std::str::from_utf8(target.as_bytes()).is_ok());
+        assert!(target.ends_with(TRUNC_MARKER));
+    }
+
+    #[test]
+    fn small_output_is_untouched() {
+        let mut target = String::new();
+        push_capped(&mut target, b"hello");
+        assert_eq!(target, "hello");
+    }
+}
+
+/// Execute a command, log stdout/stderr, and return an error on non-zero exit
+/// so a failed step aborts the whole provisioning run.
 async fn run_remote(
     session: &mut client::Handle<SshHandler>,
     description: &str,
     cmd: &str,
-) -> Result<i32, Box<dyn std::error::Error>> {
+) -> Result<(), Box<dyn std::error::Error>> {
     info!("[provision] $ {}", cmd);
     let res = exec(session, cmd).await?;
 
@@ -425,14 +666,18 @@ async fn run_remote(
 
     if res.success() {
         info!("[provision] ✓ {}", description);
+        Ok(())
     } else {
-        warn!(
-            "[provision] ✗ {} (exit code {})",
+        error!(
+            "[provision] ✗ {} (exit code {}) — aborting provisioning",
             description, res.exit_code
         );
+        Err(format!(
+            "remote command failed (exit {}): {}",
+            res.exit_code, description
+        )
+        .into())
     }
-
-    Ok(res.exit_code)
 }
 
 /// Check whether a remote file or directory exists.
@@ -529,6 +774,12 @@ mod remote_path_tests {
 /// For large files (> 60 KB) the content is split into multiple `dd` append
 /// blocks to stay within shell argument length limits.
 ///
+/// The upload is atomic: content is written to a temporary sibling path
+/// (`<remote_path>.mailserver-new`), its size is verified with `stat`, the
+/// final mode is applied, and only then is it moved into place — a reader
+/// never observes a partial file at the final path. Uploaded files are
+/// chmod'd deterministically (755 for executables, 644 otherwise).
+///
 /// * `skip_if_exists` — when `true` the upload is skipped if the remote file
 ///   already exists.
 async fn upload_file(
@@ -549,6 +800,10 @@ async fn upload_file(
     let data = std::fs::read(local_path)
         .map_err(|e| format!("cannot read local file {}: {}", local_path, e))?;
 
+    // Atomic: write to a temporary sibling, then rename into place.
+    let temp_path = format!("{}.mailserver-new", remote_path);
+    validate_remote_path(&temp_path)?;
+
     // Ensure parent directory exists
     if let Some(parent) = Path::new(remote_path).parent() {
         let parent_str = parent.to_string_lossy();
@@ -567,22 +822,23 @@ async fn upload_file(
 
     info!("[provision] file size: {} bytes, {} chunk(s)", total, n);
 
-    // Truncate (or create) the remote file first.
+    // Truncate (or create) the temp file first. This also discards any stale
+    // temp file left by an interrupted previous run.
     // Use `:` (POSIX no-op) and redirect to a quoted path — the safest
     // portable way to truncate to zero bytes.
-    let trunc_cmd = format!(": > {}", sh_single_quote(remote_path));
+    let trunc_cmd = format!(": > {}", sh_single_quote(&temp_path));
     exec(session, &trunc_cmd).await?;
 
     for (idx, chunk) in chunks.iter().enumerate() {
         let encoded = BASE64.encode(chunk);
         // Quote both `encoded` (base64 alphabet, but we still quote it for
-        // uniformity) and `remote_path` via `sh_single_quote`. The
+        // uniformity) and `temp_path` via `sh_single_quote`. The
         // `validate_remote_path` check above ensures the latter is safe even
         // before quoting.
         let cmd = format!(
             "printf '%s' {} | base64 -d >> {}",
             sh_single_quote(&encoded),
-            sh_single_quote(remote_path),
+            sh_single_quote(&temp_path),
         );
         let res = exec(session, &cmd).await?;
         if !res.success() {
@@ -597,8 +853,46 @@ async fn upload_file(
         }
     }
 
-    if executable {
-        exec_argv(session, "chmod", &["+x", remote_path]).await?;
+    // Verify the transferred size before exposing the file at its final path.
+    let stat_res = exec_argv(session, "stat", &["-c", "%s", temp_path.as_str()]).await?;
+    if !stat_res.success() {
+        return Err(format!(
+            "cannot stat uploaded temp file {} (exit {})",
+            temp_path, stat_res.exit_code
+        )
+        .into());
+    }
+    let remote_size: usize = stat_res
+        .stdout
+        .trim()
+        .parse()
+        .map_err(|_| format!("cannot parse remote size from {:?}", stat_res.stdout))?;
+    if remote_size != total {
+        return Err(format!(
+            "upload size mismatch for {}: remote {} bytes, local {} bytes",
+            remote_path, remote_size, total
+        )
+        .into());
+    }
+
+    // Apply the final mode to the temp file, then move it into place so the
+    // destination atomically gains the correct content AND permissions.
+    let mode = if executable { "755" } else { "644" };
+    let chmod_res = exec_argv(session, "chmod", &[mode, temp_path.as_str()]).await?;
+    if !chmod_res.success() {
+        return Err(format!(
+            "cannot chmod {} (exit {})",
+            temp_path, chmod_res.exit_code
+        )
+        .into());
+    }
+    let mv_res = exec_argv(session, "mv", &["-f", temp_path.as_str(), remote_path]).await?;
+    if !mv_res.success() {
+        return Err(format!(
+            "cannot move {} into place (exit {})",
+            remote_path, mv_res.exit_code
+        )
+        .into());
     }
 
     info!("[provision] ✓ uploaded {}", remote_path);
@@ -735,11 +1029,8 @@ async fn install_deps(
             _ => format!("yum install -y -q {}", pkg),
         };
 
-        let rc = run_remote(session, &format!("install {}", pkg), &install_cmd).await?;
-        if rc != 0 {
-            error!("[provision] failed to install package '{}' (exit {})", pkg, rc);
-            return Err(format!("package install failed: {}", pkg).into());
-        }
+        // `run_remote` fails fast: a non-zero install exit aborts provisioning.
+        run_remote(session, &format!("install {}", pkg), &install_cmd).await?;
     }
 
     // Extra dovecot sub-packages for LMTP
@@ -793,17 +1084,23 @@ async fn setup_users_and_dirs(
             info!("[provision] skip: user {} already exists", user);
         } else {
             // Create group then user. addgroup_flags is a static literal so
-            // it is safe to splice directly; user/group are quoted.
+            // it is safe to splice directly; user/group are quoted. There is
+            // deliberately no trailing `|| true`: with fail-fast provisioning
+            // a group/user that could not be created must abort, not silently
+            // continue with a half-broken system.
             let group_cmd = format!(
-                "groupadd {} {} 2>/dev/null || addgroup {} {} 2>/dev/null || true",
+                "groupadd {} {} 2>/dev/null || addgroup {} {}",
                 addgroup_flags,
                 sh_single_quote(group),
                 addgroup_flags,
                 sh_single_quote(group),
             );
-            exec(session, &group_cmd).await?;
+            let group_res = exec(session, &group_cmd).await?;
+            if !group_res.success() {
+                return Err(format!("failed to create system group {}", group).into());
+            }
             let user_cmd = format!(
-                "useradd {} -g {} {} 2>/dev/null || adduser {} -G {} {} 2>/dev/null || true",
+                "useradd {} -g {} {} 2>/dev/null || adduser {} -G {} {}",
                 adduser_flags,
                 sh_single_quote(group),
                 sh_single_quote(user),
@@ -995,10 +1292,36 @@ async fn start_service(
     if has_systemd {
         run_remote(session, "enable mailserver service", "systemctl enable mailserver").await?;
         run_remote(session, "restart mailserver service", "systemctl restart mailserver").await?;
-        run_remote(session, "service status", "systemctl is-active mailserver || true").await?;
+        // Status check is diagnostic, not a provisioning step: it must not
+        // abort the run, but the outcome is logged explicitly (the restart
+        // itself already failed fast on a non-zero exit above).
+        let status = exec(session, "systemctl is-active mailserver").await?;
+        let state = status.stdout.trim().to_string();
+        if status.success() {
+            info!("[provision] mailserver service is active ({})", state);
+        } else {
+            warn!(
+                "[provision] mailserver service not reported active: {} (exit {})",
+                if state.is_empty() { "unknown state" } else { &state },
+                status.exit_code
+            );
+        }
     } else if has_openrc {
-        run_remote(session, "add to default runlevel", "rc-update add mailserver default 2>/dev/null || true").await?;
-        run_remote(session, "start mailserver service", "rc-service mailserver restart || true").await?;
+        // `rc-update add` exits non-zero when the service is already in the
+        // runlevel (a plain re-provision), so check first instead of masking
+        // the failure with `|| true`.
+        let already_added = exec(
+            session,
+            "rc-update show default 2>/dev/null | grep -qw mailserver",
+        )
+        .await?
+        .success();
+        if already_added {
+            info!("[provision] skip: mailserver already in default runlevel");
+        } else {
+            run_remote(session, "add to default runlevel", "rc-update add mailserver default").await?;
+        }
+        run_remote(session, "start mailserver service", "rc-service mailserver restart").await?;
     } else {
         warn!("[provision] cannot start service automatically; start /entrypoint.sh manually");
     }
@@ -1089,12 +1412,29 @@ pub fn print_usage() {
     println!("  --user <user>         SSH login username (required)");
     println!("  --key <path>          Path to SSH private key file (recommended)");
     println!("  --password <pwd>      Password for SSH auth or encrypted key passphrase");
+    println!("                        (discouraged: visible in the process list; use");
+    println!("                        PROVISION_SSH_PASSWORD or the interactive prompt)");
     println!("  --env-file <path>     Local .env file to upload as /etc/mailserver/env");
+    println!("  --accept-new-host-key Accept and persist a host key with no matching");
+    println!("                        known_hosts entry (first connect) after comparing");
+    println!("                        the printed SHA-256 fingerprint");
+    println!();
+    println!("Environment variables:");
+    println!("  PROVISION_SSH_PASSWORD          SSH password (preferred over --password)");
+    println!("  PROVISION_KNOWN_HOSTS           known_hosts file for host-key checks");
+    println!("                                  (default: /etc/mailserver/known_hosts)");
+    println!("  PROVISION_ACCEPT_NEW_HOSTS=1    Accept and persist an unknown host key");
     println!();
     println!("The command connects via SSH, installs system dependencies, uploads the");
     println!("current mailserver binary and supporting files, configures the system");
     println!("service, and starts it. Steps that are already done are automatically");
-    println!("skipped.  Credentials are only kept in memory and never written to disk.");
+    println!("skipped, and provisioning aborts on the first failed step. Credentials");
+    println!("are only kept in memory and never written to disk.");
+    println!();
+    println!("Host keys: the server key fingerprint (SHA256:...) is printed on every");
+    println!("connect and verified against PROVISION_KNOWN_HOSTS. A mismatch aborts;");
+    println!("an unknown key requires --accept-new-host-key / PROVISION_ACCEPT_NEW_HOSTS=1");
+    println!("before it is recorded and trusted.");
     println!();
     println!("Examples:");
     println!("  mailserver provision --host mail.example.com --user root --key ~/.ssh/id_ed25519");

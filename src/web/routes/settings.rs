@@ -135,8 +135,11 @@ pub async fn page(auth: AuthAdmin, State(state): State<AppState>) -> Html<String
         auth.admin.username
     );
 
+    // openssl x509 subprocess is blocking; run off the async runtime.
     let (cert_subject, cert_issuer, cert_not_before, cert_not_after, cert_serial) =
-        read_cert_info();
+        tokio::task::spawn_blocking(read_cert_info)
+            .await
+            .unwrap_or_default();
 
     // Load feature toggle states from DB (default: enabled)
     let filter_enabled = state
@@ -388,9 +391,26 @@ pub async fn change_password(
         }
     };
     let admin_id = auth.admin.id;
-    state
+    match state
         .blocking_db(move |db| db.update_admin_password(admin_id, &hash))
-        .await;
+        .await
+    {
+        Ok(()) => {}
+        Err(e) => {
+            error!("[web] password change failed for username: {}", e);
+            let tmpl = ErrorTemplate {
+                nav_active: "Settings",
+                flash: None,
+                status_code: 500,
+                status_text: "Error",
+                title: "Error",
+                message: "Failed to update password. Please try again.",
+                back_url: "/settings",
+                back_label: "Back",
+            };
+            return Html(tmpl.render().unwrap()).into_response();
+        }
+    }
     info!(
         "[web] password changed successfully for username={}",
         auth.admin.username
@@ -515,15 +535,24 @@ pub async fn disable_2fa(auth: AuthAdmin, State(state): State<AppState>) -> Resp
 
 pub async fn regenerate_tls(auth: AuthAdmin, State(state): State<AppState>) -> Response {
     info!("[web] POST /settings/tls/regenerate — regenerating self-signed TLS certificate by username={}", auth.admin.username);
-    let hostname = &state.hostname;
+    let hostname = state.hostname.clone();
 
-    match crate::config::generate_all_certificates(hostname, true) {
-        Ok(_) => {
+    // Certificate generation shells out to openssl and derives DH params,
+    // followed by service reloads — all blocking; run off the async runtime.
+    let hostname_for_blocking = hostname.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        crate::config::generate_all_certificates(&hostname_for_blocking, true)?;
+        crate::config::reload_services();
+        Ok::<(), String>(())
+    })
+    .await;
+
+    match result {
+        Ok(Ok(())) => {
             info!(
                 "[web] TLS certificates and DH parameters regenerated successfully for hostname={}",
                 hostname
             );
-            crate::config::reload_services();
             let tmpl = ErrorTemplate {
                 nav_active: "Settings",
                 flash: None,
@@ -537,7 +566,7 @@ pub async fn regenerate_tls(auth: AuthAdmin, State(state): State<AppState>) -> R
             };
             Html(tmpl.render().unwrap()).into_response()
         }
-        Err(e) => {
+        Ok(Err(e)) => {
             error!("[web] failed to regenerate TLS certificates: {}", e);
             let tmpl = ErrorTemplate {
                 nav_active: "Settings",
@@ -546,6 +575,20 @@ pub async fn regenerate_tls(auth: AuthAdmin, State(state): State<AppState>) -> R
                 status_text: "Error",
                 title: "Error",
                 message: &format!("Failed to regenerate TLS certificates: {}", e),
+                back_url: "/settings",
+                back_label: "Back to Settings",
+            };
+            Html(tmpl.render().unwrap()).into_response()
+        }
+        Err(e) => {
+            error!("[web] TLS regeneration thread failed: {}", e);
+            let tmpl = ErrorTemplate {
+                nav_active: "Settings",
+                flash: None,
+                status_code: 500,
+                status_text: "Error",
+                title: "Error",
+                message: "Failed to regenerate TLS certificates.",
                 back_url: "/settings",
                 back_label: "Back to Settings",
             };
@@ -602,8 +645,11 @@ pub async fn restart_container(auth: AuthAdmin) -> Response {
         auth.admin.username
     );
 
-    match crate::config::restart_container() {
-        Ok(()) => {
+    // docker restart is subprocess-bound; run off the async runtime.
+    let result = tokio::task::spawn_blocking(crate::config::restart_container).await;
+
+    match result {
+        Ok(Ok(())) => {
             info!(
                 "[web] container restart initiated by username={}",
                 auth.admin.username
@@ -620,7 +666,7 @@ pub async fn restart_container(auth: AuthAdmin) -> Response {
             };
             Html(tmpl.render().unwrap()).into_response()
         }
-        Err(e) => {
+        Ok(Err(e)) => {
             error!(
                 "[web] failed to restart container by username={}: {}",
                 auth.admin.username, e
@@ -632,6 +678,23 @@ pub async fn restart_container(auth: AuthAdmin) -> Response {
                 status_text: "Error",
                 title: "Error",
                 message: &format!("Failed to restart container: {}", e),
+                back_url: "/settings",
+                back_label: "Back to Settings",
+            };
+            Html(tmpl.render().unwrap()).into_response()
+        }
+        Err(e) => {
+            error!(
+                "[web] container restart thread failed for username={}: {}",
+                auth.admin.username, e
+            );
+            let tmpl = ErrorTemplate {
+                nav_active: "Settings",
+                flash: None,
+                status_code: 500,
+                status_text: "Error",
+                title: "Error",
+                message: "Failed to restart container.",
                 back_url: "/settings",
                 back_label: "Back to Settings",
             };

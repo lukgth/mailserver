@@ -5,13 +5,73 @@ use axum::{
     routing::get,
     Router,
 };
-use log::{debug, info};
+use log::{debug, info, warn};
+
+use std::collections::{HashMap, VecDeque};
+use std::net::IpAddr;
+use std::sync::{LazyLock, Mutex};
+use std::time::{Duration, Instant};
 
 use crate::web::forms::PixelQuery;
 use crate::web::AppState;
 
 pub fn routes() -> Router<AppState> {
     Router::new().route("/pixel", get(pixel_handler))
+}
+
+// ── Per-IP pixel rate limiting ──────────────────────────────────────────────
+// In-memory sliding window (mirrors the LOGIN_FAILURES pattern in web/auth.rs):
+// max PIXEL_MAX_PER_MIN requests per IP per minute, then HTTP 429. The map is
+// bounded to PIXEL_MAX_ENTRIES keys; stale entries are evicted eagerly and an
+// arbitrary entry is dropped when the cap is still reached.
+
+const PIXEL_MAX_PER_MIN: usize = 30;
+const PIXEL_WINDOW: Duration = Duration::from_secs(60);
+const PIXEL_MAX_ENTRIES: usize = 10_000;
+
+type PixelRateMap = HashMap<IpAddr, VecDeque<Instant>>;
+
+static PIXEL_RATE_LIMITS: LazyLock<Mutex<PixelRateMap>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Sliding-window per-IP rate limiter. Returns `true` when the request is
+/// allowed (and records it); `false` when the IP has exceeded the limit.
+fn pixel_rate_allowed(ip: &IpAddr) -> bool {
+    let now = Instant::now();
+    let cutoff = now - PIXEL_WINDOW;
+    let mut map = PIXEL_RATE_LIMITS.lock().unwrap();
+    if map.len() >= PIXEL_MAX_ENTRIES {
+        // Evict stale entries before dropping anything.
+        map.retain(|_, times| {
+            times.retain(|&t| t >= cutoff);
+            !times.is_empty()
+        });
+    }
+    if map.len() >= PIXEL_MAX_ENTRIES {
+        // Still at capacity — evict one arbitrary entry (bounded memory).
+        if let Some(k) = map.keys().next().copied() {
+            map.remove(&k);
+        }
+    }
+    let times = map.entry(*ip).or_default();
+    times.retain(|&t| t >= cutoff);
+    if times.len() >= PIXEL_MAX_PER_MIN {
+        return false;
+    }
+    times.push_back(now);
+    true
+}
+
+/// Truncate a string to `max` bytes at a character boundary.
+fn truncate_at(s: &str, max: usize) -> String {
+    if s.len() <= max {
+        return s.to_string();
+    }
+    let mut end = max;
+    while !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    s[..end].to_string()
 }
 
 /// Mask the last segment of an IP address for privacy.
@@ -45,34 +105,43 @@ async fn pixel_handler(
             &params.id
         }
     );
+
+    // Per-IP sliding-window rate limit (applies to every pixel request).
+    let (parts, _body) = req.into_parts();
+    let client_ip = crate::web::auth::get_client_ip(&parts);
+    if !pixel_rate_allowed(&client_ip) {
+        warn!("[web] pixel rate limit exceeded for IP {}", client_ip);
+        return (StatusCode::TOO_MANY_REQUESTS, "Too many requests").into_response();
+    }
+
     if !params.id.is_empty() {
-        let client_ip = req
-            .headers()
-            .get("x-forwarded-for")
-            .and_then(|v| v.to_str().ok())
-            .map(|s| s.split(',').next().unwrap_or("").trim().to_string())
-            .or_else(|| {
-                req.headers()
-                    .get("x-real-ip")
-                    .and_then(|v| v.to_str().ok())
-                    .map(|s| s.to_string())
-            })
-            .unwrap_or_default();
-
         // Mask last segment of IP for geo-location while preserving privacy
-        let client_ip = mask_ip(&client_ip);
+        let masked_ip = mask_ip(&client_ip.to_string());
 
-        let user_agent = req
-            .headers()
+        let user_agent = parts
+            .headers
             .get(header::USER_AGENT)
             .and_then(|v| v.to_str().ok())
             .unwrap_or("")
             .to_string();
+        // Cap the stored user agent to bound log-row size.
+        let user_agent = truncate_at(&user_agent, 256);
 
         let message_id = params.id.clone();
 
+        // Only record opens for messages this server actually tracked; ignore
+        // unknown ids with a 204 so scanners cannot populate the table.
         let db_message_id = message_id.clone();
-        let db_client_ip = client_ip.clone();
+        let known = state
+            .blocking_db(move |db| db.tracked_message_exists(&db_message_id))
+            .await;
+        if !known {
+            debug!("[web] pixel open for unknown message_id={}, ignoring", message_id);
+            return StatusCode::NO_CONTENT.into_response();
+        }
+
+        let db_message_id = message_id.clone();
+        let db_client_ip = masked_ip.clone();
         let db_user_agent = user_agent.clone();
 
         state
@@ -82,7 +151,7 @@ async fn pixel_handler(
             .await;
         info!(
             "[web] pixel open recorded: message_id={}, client_ip={}, user_agent={}",
-            message_id, client_ip, user_agent
+            message_id, masked_ip, user_agent
         );
     }
 

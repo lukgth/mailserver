@@ -33,6 +33,48 @@ use super::webmail::{
 const PROTOCOL_VERSION: &str = "2024-11-05";
 const PAGE_SIZE: usize = 20;
 
+/// Sensitive tool-argument keys whose values are redacted before logging.
+const REDACTED_ARG_KEYS: [&str; 3] = ["body", "subject", "text"];
+
+/// Derive the per-client rate-limit key: the calling API token's fingerprint
+/// when authenticated with a Bearer token, otherwise `"admin"` (Basic auth).
+fn guard_key(headers: &axum::http::HeaderMap) -> String {
+    headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|h| h.strip_prefix("Bearer "))
+        .map(|token| {
+            use sha2::Digest;
+            let digest = sha2::Sha256::digest(token.as_bytes());
+            hex::encode(digest)
+        })
+        .unwrap_or_else(|| "admin".to_string())
+}
+
+/// Redact sensitive request content before it is written to the MCP call log.
+/// `body`/`subject`/`text` argument values are replaced with `[redacted]`;
+/// when the params are not a simple object the arguments are stripped
+/// entirely while the tool name (and method) are preserved.
+fn redact_request(req: &McpRequest) -> serde_json::Value {
+    let mut value = serde_json::to_value(req).unwrap_or(serde_json::Value::Null);
+    if let Some(params) = value.get_mut("params").and_then(|p| p.as_object_mut()) {
+        match params.get_mut("arguments").and_then(|a| a.as_object_mut()) {
+            Some(arguments) => {
+                for key in REDACTED_ARG_KEYS {
+                    if arguments.contains_key(key) {
+                        arguments.insert(key.to_string(), serde_json::Value::String("[redacted]".into()));
+                    }
+                }
+            }
+            None => {
+                // Not a simple object — drop the arguments, keep the tool name.
+                params.remove("arguments");
+            }
+        }
+    }
+    value
+}
+
 // ── Harness rules ─────────────────────────────────────────────────────────────
 
 /// Rules surfaced to AI clients on every `initialize` response and shown on
@@ -297,6 +339,7 @@ pub async fn page(
 pub async fn handle(
     _auth: AuthAdmin,
     State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
     Json(req): Json<McpRequest>,
 ) -> Json<McpResponse> {
     info!("[mcp] method={}", req.method);
@@ -304,7 +347,8 @@ pub async fn handle(
     let id = req.id.clone();
     let method = req.method.clone();
     let started = std::time::Instant::now();
-    let request_body = serde_json::to_string(&req).unwrap_or_else(|e| {
+    // Redact sensitive arguments before the request body ever reaches a log.
+    let request_body = serde_json::to_string(&redact_request(&req)).unwrap_or_else(|e| {
         warn!("[mcp] failed to serialize request for logging: {}", e);
         "(serialization failed)".to_string()
     });
@@ -321,41 +365,49 @@ pub async fn handle(
     };
     let is_destructive = matches!(tool.as_deref(), Some("send_email") | Some("delete_email"));
 
+    // Per-client rate limiting; `initialize` and `tools/list` are session
+    // negotiation, not tool calls, so they are not counted against the budget.
+    let key = guard_key(&headers);
+    let is_tool_call = method == "tools/call";
+
     // ── Rate-limit check ──────────────────────────────────────────────────────
-    if let Some(reason) = {
-        let mut guard = state
-            .mcp_guard
-            .lock()
-            .unwrap_or_else(|p| { warn!("[mcp] mcp_guard was poisoned; recovering"); p.into_inner() });
-        guard.check_and_record(is_destructive)
-    } {
-        warn!("[mcp] {}", reason);
-        let duration_ms = started.elapsed().as_millis() as i64;
-        let reason2 = reason.clone();
-        let state2 = state.clone();
-        let method2 = method.clone();
-        let tool2 = tool.clone();
-        let body2 = request_body.clone();
-        tokio::spawn(async move {
-            state2
-                .blocking_db(move |db| {
-                    db.log_mcp_call(
-                        &method2,
-                        tool2.as_deref(),
-                        false,
-                        &reason2,
-                        duration_ms,
-                        Some(&body2),
-                    )
-                })
-                .await;
-        });
-        super::super::fire_webhook(
-            &state,
-            "mcp.rate_limit_exceeded",
-            json!({ "reason": reason, "method": method, "tool": tool }),
-        );
-        return Json(McpResponse::err(id, -32000, reason));
+    if is_tool_call {
+        if let Some(reason) = {
+            let mut guard = state
+                .mcp_guard
+                .lock()
+                .unwrap_or_else(|p| { warn!("[mcp] mcp_guard was poisoned; recovering"); p.into_inner() });
+            guard.check_and_record(&key, is_destructive)
+        } {
+            warn!("[mcp] {}", reason);
+            let duration_ms = started.elapsed().as_millis() as i64;
+            let reason2 = reason.clone();
+            let state2 = state.clone();
+            let method2 = method.clone();
+            let tool2 = tool.clone();
+            let body2 = request_body.clone();
+            let key2 = key.clone();
+            tokio::spawn(async move {
+                state2
+                    .blocking_db(move |db| {
+                        db.log_mcp_call(
+                            &method2,
+                            tool2.as_deref(),
+                            false,
+                            &reason2,
+                            duration_ms,
+                            Some(&body2),
+                        )
+                    })
+                    .await;
+            });
+            super::super::fire_webhook(
+                &state,
+                "mcp.rate_limit_exceeded",
+                json!({ "reason": reason, "method": method, "tool": tool, "client_key": key2 }),
+            );
+            return Json(McpResponse::err(id, -32000, reason));
+        }
     }
 
     // ── Process request ───────────────────────────────────────────────────────
@@ -382,26 +434,28 @@ pub async fn handle(
     let duration_ms = started.elapsed().as_millis() as i64;
 
     // ── Record outcome; fire anomaly webhook if threshold reached ─────────────
-    if let Some(reason) = {
-        let mut guard = state
-            .mcp_guard
-            .lock()
-            .unwrap_or_else(|p| { warn!("[mcp] mcp_guard was poisoned; recovering"); p.into_inner() });
-        guard.record_outcome(result.is_ok())
-    } {
-        warn!("[mcp] {}", reason);
-        super::super::fire_webhook(
-            &state,
-            "mcp.anomaly",
-            json!({
-                "reason": reason,
-                "method": method,
-                "tool": tool,
-                // result is Err here; unwrap_or_default() is defensive in case the Err variant
-                // somehow contains no string (which cannot happen with our current Result<Value,String>)
-                "error": result.as_ref().err().cloned().unwrap_or_default()
-            }),
-        );
+    if is_tool_call {
+        if let Some(reason) = {
+            let mut guard = state
+                .mcp_guard
+                .lock()
+                .unwrap_or_else(|p| { warn!("[mcp] mcp_guard was poisoned; recovering"); p.into_inner() });
+            guard.record_outcome(&key, result.is_ok())
+        } {
+            warn!("[mcp] {}", reason);
+            super::super::fire_webhook(
+                &state,
+                "mcp.anomaly",
+                json!({
+                    "reason": reason,
+                    "method": method,
+                    "tool": tool,
+                    // result is Err here; unwrap_or_default() is defensive in case the Err variant
+                    // somehow contains no string (which cannot happen with our current Result<Value,String>)
+                    "error": result.as_ref().err().cloned().unwrap_or_default()
+                }),
+            );
+        }
     }
 
     // ── Log to DB and return ──────────────────────────────────────────────────
@@ -947,7 +1001,7 @@ mod tests {
     fn guard_allows_calls_below_global_limit() {
         let mut g = super::super::super::McpGuard::new();
         for _ in 0..super::super::super::MCP_RATE_LIMIT_PER_MIN {
-            assert!(g.check_and_record(false).is_none());
+            assert!(g.check_and_record("admin", false).is_none());
         }
     }
 
@@ -955,9 +1009,9 @@ mod tests {
     fn guard_blocks_at_global_limit() {
         let mut g = super::super::super::McpGuard::new();
         for _ in 0..super::super::super::MCP_RATE_LIMIT_PER_MIN {
-            g.check_and_record(false);
+            g.check_and_record("admin", false);
         }
-        let result = g.check_and_record(false);
+        let result = g.check_and_record("admin", false);
         assert!(result.is_some());
         assert!(result.unwrap().contains("Rate limit exceeded"));
     }
@@ -966,9 +1020,9 @@ mod tests {
     fn guard_blocks_destructive_at_destructive_limit() {
         let mut g = super::super::super::McpGuard::new();
         for _ in 0..super::super::super::MCP_DESTRUCTIVE_RATE_LIMIT_PER_MIN {
-            assert!(g.check_and_record(true).is_none());
+            assert!(g.check_and_record("admin", true).is_none());
         }
-        let result = g.check_and_record(true);
+        let result = g.check_and_record("admin", true);
         assert!(result.is_some());
         assert!(result.unwrap().to_lowercase().contains("destructive"));
     }
@@ -978,21 +1032,37 @@ mod tests {
         let mut g = super::super::super::McpGuard::new();
         // Fill destructive window
         for _ in 0..super::super::super::MCP_DESTRUCTIVE_RATE_LIMIT_PER_MIN {
-            g.check_and_record(true);
+            g.check_and_record("admin", true);
         }
         // A non-destructive call should still be allowed (global limit not hit)
-        assert!(g.check_and_record(false).is_none());
+        assert!(g.check_and_record("admin", false).is_none());
+    }
+
+    #[test]
+    fn guard_keys_are_isolated() {
+        // Two clients with different keys do not share a rate-limit window.
+        let mut g = super::super::super::McpGuard::new();
+        for _ in 0..super::super::super::MCP_RATE_LIMIT_PER_MIN {
+            assert!(g.check_and_record("client-a", false).is_none());
+        }
+        assert!(g.check_and_record("client-a", false).is_some());
+        assert!(g.check_and_record("client-b", false).is_none());
     }
 
     #[test]
     fn guard_record_outcome_resets_on_success() {
         let mut g = super::super::super::McpGuard::new();
-        for _ in 0..3 {
-            g.record_outcome(false);
+        let threshold = super::super::super::MCP_ANOMALY_CONSECUTIVE_FAILURES;
+        // Failures below the threshold never fire an anomaly.
+        for _ in 0..threshold - 1 {
+            assert!(g.record_outcome("admin", false).is_none());
         }
-        assert_eq!(g.consecutive_failures(), 3);
-        g.record_outcome(true);
-        assert_eq!(g.consecutive_failures(), 0);
+        // A success resets the streak: the next failures start counting over.
+        assert!(g.record_outcome("admin", true).is_none());
+        for _ in 0..threshold - 1 {
+            assert!(g.record_outcome("admin", false).is_none());
+        }
+        assert!(g.record_outcome("admin", false).is_some());
     }
 
     #[test]
@@ -1000,11 +1070,55 @@ mod tests {
         let mut g = super::super::super::McpGuard::new();
         let threshold = super::super::super::MCP_ANOMALY_CONSECUTIVE_FAILURES;
         for i in 0..threshold - 1 {
-            let r = g.record_outcome(false);
+            let r = g.record_outcome("admin", false);
             assert!(r.is_none(), "should not fire anomaly on failure #{}", i + 1);
         }
-        let r = g.record_outcome(false);
+        let r = g.record_outcome("admin", false);
         assert!(r.is_some(), "should fire anomaly on failure #{}", threshold);
         assert!(r.unwrap().contains("Anomaly"));
+    }
+
+    // ── Request redaction tests ───────────────────────────────────────────────
+
+    #[test]
+    fn redact_request_replaces_sensitive_argument_values() {
+        let req = McpRequest {
+            jsonrpc: Some("2.0".to_string()),
+            id: Some(json!(1)),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "send_email",
+                "arguments": {
+                    "account_id": 7,
+                    "to": "someone@example.com",
+                    "subject": "secret subject",
+                    "body": "secret body text",
+                    "sender_name": "Visible Name"
+                }
+            })),
+        };
+        let redacted = redact_request(&req);
+        let args = &redacted["params"]["arguments"];
+        assert_eq!(args["body"], "[redacted]");
+        assert_eq!(args["subject"], "[redacted]");
+        assert_eq!(args["to"], "someone@example.com");
+        assert_eq!(args["sender_name"], "Visible Name");
+        assert_eq!(redacted["method"], "tools/call");
+    }
+
+    #[test]
+    fn redact_request_strips_non_object_arguments() {
+        let req = McpRequest {
+            jsonrpc: Some("2.0".to_string()),
+            id: Some(json!(2)),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "read_email",
+                "arguments": "not-an-object"
+            })),
+        };
+        let redacted = redact_request(&req);
+        assert_eq!(redacted["params"]["name"], "read_email");
+        assert!(redacted["params"].get("arguments").is_none());
     }
 }

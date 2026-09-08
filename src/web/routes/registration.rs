@@ -8,8 +8,97 @@ use axum::{
 use log::{info, warn};
 use serde::Deserialize;
 
+use std::collections::HashMap;
+use std::net::IpAddr;
+use std::sync::{LazyLock, Mutex};
+use std::time::{Duration, Instant};
+
 use crate::web::fire_webhook_with_db;
 use crate::web::AppState;
+
+/// Single generic error returned for every registration failure. Keeping one
+/// message across all paths prevents attackers from enumerating which domains
+/// allow registration, which usernames are taken, or whether an invite code
+/// was valid.
+const GENERIC_REGISTRATION_ERROR: &str =
+    "Registration could not be completed. Please check your details and try again.";
+
+// ── Per-IP registration rate limiting ───────────────────────────────────────
+// In-memory window (mirrors the LOGIN_FAILURES pattern in web/auth.rs):
+// max 5 attempts per IP per 15 minutes. The map is bounded to
+// REG_MAX_ENTRIES keys with eager stale eviction and drop-one eviction.
+
+const MAX_REG_ATTEMPTS: u32 = 5;
+const REG_WINDOW: Duration = Duration::from_secs(900); // 15 minutes
+const REG_MAX_ENTRIES: usize = 10_000;
+
+struct RegRecord {
+    count: u32,
+    first_at: Instant,
+}
+
+static REG_ATTEMPTS: LazyLock<Mutex<HashMap<IpAddr, RegRecord>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Returns `true` when the IP has exceeded the 5-attempts-per-15-minutes limit.
+fn reg_rate_limited(ip: &IpAddr) -> bool {
+    let now = Instant::now();
+    let cutoff = now - REG_WINDOW;
+    let mut map = REG_ATTEMPTS.lock().unwrap();
+    if map.len() >= REG_MAX_ENTRIES {
+        map.retain(|_, r| r.first_at >= cutoff);
+    }
+    if map.len() >= REG_MAX_ENTRIES {
+        if let Some(k) = map.keys().next().copied() {
+            map.remove(&k);
+        }
+    }
+    match map.get_mut(ip) {
+        Some(rec) => {
+            if now.duration_since(rec.first_at) > REG_WINDOW {
+                // Window expired — start fresh.
+                rec.count = 1;
+                rec.first_at = now;
+                false
+            } else if rec.count >= MAX_REG_ATTEMPTS {
+                warn!("[web] registration rate limit exceeded for IP {}", ip);
+                true
+            } else {
+                rec.count += 1;
+                false
+            }
+        }
+        None => {
+            map.insert(
+                *ip,
+                RegRecord {
+                    count: 1,
+                    first_at: now,
+                },
+            );
+            false
+        }
+    }
+}
+
+/// Extracts the client IP via the shared trust chain
+/// (`crate::web::auth::get_client_ip`: X-Real-IP → last XFF entry → socket).
+pub(crate) struct ClientIp(pub IpAddr);
+
+#[axum::async_trait]
+impl<S> axum::extract::FromRequestParts<S> for ClientIp
+where
+    S: Send + Sync,
+{
+    type Rejection = std::convert::Infallible;
+
+    async fn from_request_parts(
+        parts: &mut axum::http::request::Parts,
+        _state: &S,
+    ) -> Result<Self, Self::Rejection> {
+        Ok(ClientIp(crate::web::auth::get_client_ip(parts)))
+    }
+}
 
 // ── Forms ──
 
@@ -156,12 +245,28 @@ pub async fn show_form(State(state): State<AppState>) -> Response {
 /// Handle the registration form submission.
 pub async fn handle_form(
     State(state): State<AppState>,
+    ClientIp(ip): ClientIp,
     Form(form): Form<RegisterForm>,
 ) -> Response {
     info!(
         "[web] POST /register — attempt username={}, domain={}",
         form.username, form.domain
     );
+
+    // Per-IP rate limit before any database work.
+    if reg_rate_limited(&ip) {
+        let tmpl = ErrorTemplate {
+            nav_active: "",
+            flash: None,
+            status_code: 429,
+            status_text: "Too Many Requests",
+            title: "Registration Unavailable",
+            message: GENERIC_REGISTRATION_ERROR,
+            back_url: "/register",
+            back_label: "Try Again",
+        };
+        return (StatusCode::TOO_MANY_REQUESTS, Html(tmpl.render().unwrap())).into_response();
+    }
 
     let domain_lower = form.domain.trim().to_ascii_lowercase();
 
@@ -175,10 +280,10 @@ pub async fn handle_form(
             let tmpl = ErrorTemplate {
                 nav_active: "",
                 flash: None,
-                status_code: 404,
-                status_text: "Not Found",
+                status_code: 422,
+                status_text: "Unprocessable Entity",
                 title: "Registration Unavailable",
-                message: "Registration is not available for this domain.",
+                message: GENERIC_REGISTRATION_ERROR,
                 back_url: "/register",
                 back_label: "Try Again",
             };
@@ -233,33 +338,43 @@ pub async fn handle_form(
     };
 
     // Validate username first (before consuming invite code)
-    if let Err(reason) = validate_username(&username, &domain_obj.registration_username_regex) {
-        return re_render(&reason).await;
+    if let Err(_reason) = validate_username(&username, &domain_obj.registration_username_regex) {
+        return re_render(GENERIC_REGISTRATION_ERROR).await;
     }
 
     // Validate display name length
     if name.len() > 128 {
-        return re_render("Display name must be 128 characters or fewer.").await;
+        return re_render(GENERIC_REGISTRATION_ERROR).await;
     }
 
     // Validate invite code is provided
     if invite_code.is_empty() {
-        return re_render("Invite code is required.").await;
+        return re_render(GENERIC_REGISTRATION_ERROR).await;
     }
 
     // Validate invite code format (32 hex chars)
     if invite_code.len() != 32 || !invite_code.chars().all(|c| c.is_ascii_hexdigit()) {
-        return re_render("Invalid invite code.").await;
+        return re_render(GENERIC_REGISTRATION_ERROR).await;
     }
 
     // Validate password before consuming the invite code — a failed validation
     // would permanently burn a single-use code with no rollback available.
     if password != confirm_password {
-        return re_render("Passwords do not match.").await;
+        return re_render(GENERIC_REGISTRATION_ERROR).await;
     }
     if password.len() < 8 {
-        return re_render("Password must be at least 8 characters.")
-            .await;
+        return re_render(GENERIC_REGISTRATION_ERROR).await;
+    }
+
+    // Reject duplicate usernames BEFORE consuming the invite code so a taken
+    // name does not burn a single-use code.
+    let domain_id = domain_obj.id;
+    let username_check = username.clone();
+    let username_exists = state
+        .blocking_db(move |db| db.username_exists(domain_id, &username_check))
+        .await;
+    if username_exists {
+        return re_render(GENERIC_REGISTRATION_ERROR).await;
     }
 
     let code_valid = state
@@ -271,8 +386,7 @@ pub async fn handle_form(
         .await;
 
     if !code_valid {
-        return re_render("Invalid or already used invite code.")
-            .await;
+        return re_render(GENERIC_REGISTRATION_ERROR).await;
     }
 
     // Hash the password
@@ -280,13 +394,11 @@ pub async fn handle_form(
         Ok(h) => h,
         Err(e) => {
             warn!("[register] failed to hash password: {}", e);
-            return re_render("Failed to process your registration. Please try again.")
-                .await;
+            return re_render(GENERIC_REGISTRATION_ERROR).await;
         }
     };
 
     let domain_name = domain_obj.domain.clone();
-    let domain_id = domain_obj.id;
     let username_clone = username.clone();
     let name_clone = name.clone();
 
@@ -341,14 +453,6 @@ pub async fn handle_form(
                 "[register] failed to create account {}@{}: {}",
                 username, domain_name, e
             );
-            let reason = if e.contains("23505")
-                || e.to_lowercase().contains("unique")
-                || e.to_lowercase().contains("duplicate")
-            {
-                "That username is already taken on this domain.".to_string()
-            } else {
-                "Registration failed. Please try again.".to_string()
-            };
             let tmpl = RegisterFormTemplate {
                 nav_active: "",
                 flash: None,
@@ -365,7 +469,7 @@ pub async fn handle_form(
                 username_preview: format!("{}@{}", username, domain_name),
                 name,
                 invite_code: String::new(),
-                error: Some(reason),
+                error: Some(GENERIC_REGISTRATION_ERROR.to_string()),
             };
             Html(tmpl.render().unwrap()).into_response()
         }

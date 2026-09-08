@@ -15,6 +15,20 @@ use crate::web::auth::AuthAdmin;
 use crate::web::forms::{TrackingPatternForm, TrackingRuleForm, UnsubscribeQuery};
 use crate::web::AppState;
 
+/// Return a masked form of a token for logging: first and last 4 characters
+/// only, so full unsubscribe tokens never appear in logs. Char-safe for
+/// arbitrary user-supplied input.
+fn mask_token(token: &str) -> String {
+    let chars: Vec<char> = token.chars().collect();
+    if chars.len() > 8 {
+        let head: String = chars[..4].iter().collect();
+        let tail: String = chars[chars.len() - 4..].iter().collect();
+        format!("{}…{}", head, tail)
+    } else {
+        "****".to_string()
+    }
+}
+
 // ── Templates ──
 
 #[derive(Template)]
@@ -50,7 +64,10 @@ async fn unsubscribe_confirm_page(
     State(state): State<AppState>,
     Query(params): Query<UnsubscribeQuery>,
 ) -> Response {
-    debug!("[web] GET /unsubscribe token={}", params.token);
+    debug!(
+        "[web] GET /unsubscribe token={}",
+        mask_token(&params.token)
+    );
     if params.token.is_empty() {
         let tmpl = ConfirmTemplate {
             token: "",
@@ -82,7 +99,10 @@ async fn unsubscribe_confirm_page(
             Html(tmpl.render().unwrap()).into_response()
         }
         None => {
-            warn!("[web] unsubscribe token not found: {}", params.token);
+            warn!(
+                "[web] unsubscribe token not found: {}",
+                mask_token(&params.token)
+            );
             let tmpl = ConfirmTemplate {
                 token: &params.token,
                 success: false,
@@ -101,7 +121,10 @@ async fn unsubscribe_one_click(
     State(state): State<AppState>,
     Query(params): Query<UnsubscribeQuery>,
 ) -> Response {
-    info!("[web] POST /unsubscribe token={}", params.token);
+    info!(
+        "[web] POST /unsubscribe token={}",
+        mask_token(&params.token)
+    );
     if params.token.is_empty() {
         let tmpl = ConfirmTemplate {
             token: "",
@@ -135,7 +158,10 @@ async fn unsubscribe_one_click(
             Html(tmpl.render().unwrap()).into_response()
         }
         None => {
-            warn!("[web] unsubscribe token not found: {}", params.token);
+            warn!(
+                "[web] unsubscribe token not found: {}",
+                mask_token(&params.token)
+            );
             let tmpl = ConfirmTemplate {
                 token: &params.token,
                 success: false,

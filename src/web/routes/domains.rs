@@ -247,25 +247,41 @@ pub async fn create(
     Form(form): Form<DomainForm>,
 ) -> Response {
     info!("[web] POST /domains — creating domain={}", form.domain);
-    let domain = form.domain.clone();
+    let domain = match crate::web::forms::validate_domain_name(&form.domain) {
+        Ok(d) => d,
+        Err(e) => {
+            let tmpl = ErrorTemplate {
+                nav_active: "Domains",
+                flash: None,
+                status_code: 400,
+                status_text: "Bad Request",
+                title: "Error",
+                message: &e,
+                back_url: "/domains/new",
+                back_label: "Back",
+            };
+            return Html(tmpl.render().unwrap()).into_response();
+        }
+    };
     let bimi_svg = form.bimi_svg.clone();
     let unsubscribe_enabled = form.unsubscribe_enabled.is_some();
+    let domain_for_db = domain.clone();
     let create_result = state
         .blocking_db(move |db| {
-            db.create_domain(&domain, &bimi_svg, unsubscribe_enabled)
+            db.create_domain(&domain_for_db, &bimi_svg, unsubscribe_enabled)
         })
         .await;
     match create_result {
         Ok(id) => {
             info!(
                 "[web] domain created successfully: {} (id={})",
-                form.domain, id
+                domain, id
             );
             regen_configs(&state).await;
             fire_webhook(
                 &state,
                 "domain.created",
-                serde_json::json!({"domain": form.domain}),
+                serde_json::json!({"domain": domain}),
             );
             Redirect::to("/domains").into_response()
         }
@@ -314,20 +330,36 @@ pub async fn update(
     Form(form): Form<DomainEditForm>,
 ) -> Response {
     let active = form.active.is_some();
+    let domain = match crate::web::forms::validate_domain_name(&form.domain) {
+        Ok(d) => d,
+        Err(e) => {
+            let tmpl = ErrorTemplate {
+                nav_active: "Domains",
+                flash: None,
+                status_code: 400,
+                status_text: "Bad Request",
+                title: "Error",
+                message: &e,
+                back_url: &format!("/domains/{}/edit", id),
+                back_label: "Back",
+            };
+            return Html(tmpl.render().unwrap()).into_response();
+        }
+    };
     info!(
         "[web] POST /domains/{} — updating domain={}, active={}",
-        id, form.domain, active
+        id, domain, active
     );
-    let domain = form.domain.clone();
     let bimi_svg = form.bimi_svg.clone();
     let unsubscribe_enabled = form.unsubscribe_enabled.is_some();
     let registration_enabled = form.registration_enabled.is_some();
     let registration_username_regex = form.registration_username_regex.clone();
+    let domain_for_db = domain.clone();
     state
         .blocking_db(move |db| {
             db.update_domain(
                 id,
-                &domain,
+                &domain_for_db,
                 active,
                 &bimi_svg,
                 unsubscribe_enabled,
@@ -340,7 +372,7 @@ pub async fn update(
     fire_webhook(
         &state,
         "domain.updated",
-        serde_json::json!({"id": id, "domain": form.domain}),
+        serde_json::json!({"id": id, "domain": domain}),
     );
     Redirect::to("/domains").into_response()
 }
@@ -371,110 +403,91 @@ pub async fn generate_dkim(
         }
     };
 
-    debug!(
-        "[web] generating RSA 2048 private key for domain={}",
-        domain.domain
-    );
-    let priv_output = std::process::Command::new("openssl")
-        .args(["genrsa", "2048"])
-        .output();
-    let private_key = match priv_output {
-        Ok(o) if o.status.success() => {
-            debug!(
-                "[web] DKIM private key generated for domain={}",
-                domain.domain
-            );
-            String::from_utf8_lossy(&o.stdout).to_string()
-        }
-        Ok(o) => {
-            error!(
-                "[web] openssl genrsa failed for domain={}: {}",
-                domain.domain,
-                String::from_utf8_lossy(&o.stderr)
-            );
-            let tmpl = ErrorTemplate {
-                nav_active: "Domains",
-                flash: None,
-                status_code: 500,
-                status_text: "Error",
-                title: "Error",
-                message: "Failed to generate DKIM private key.",
-                back_url: "/domains",
-                back_label: "Back",
-            };
-            return Html(tmpl.render().unwrap()).into_response();
-        }
-        Err(e) => {
-            error!(
-                "[web] failed to run openssl genrsa for domain={}: {}",
-                domain.domain, e
-            );
-            let tmpl = ErrorTemplate {
-                nav_active: "Domains",
-                flash: None,
-                status_code: 500,
-                status_text: "Error",
-                title: "Error",
-                message: "Failed to generate DKIM private key.",
-                back_url: "/domains",
-                back_label: "Back",
-            };
-            return Html(tmpl.render().unwrap()).into_response();
-        }
-    };
-
-    debug!("[web] extracting public key for domain={}", domain.domain);
-    let pub_output = std::process::Command::new("openssl")
-        .args(["rsa", "-pubout"])
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .and_then(|mut child| {
-            use std::io::Write;
-            if let Some(ref mut stdin) = child.stdin {
-                stdin.write_all(private_key.as_bytes()).ok();
+    let dkim_selector = domain.dkim_selector.clone();
+    let domain_name_for_log = domain.domain.clone();
+    // openssl genrsa is subprocess-bound; run off the async runtime.
+    let keys: Result<(String, String), String> = tokio::task::spawn_blocking(move || {
+        let priv_output = std::process::Command::new("openssl")
+            .args(["genrsa", "2048"])
+            .output();
+        let private_key = match priv_output {
+            Ok(o) if o.status.success() => {
+                debug!(
+                    "[web] DKIM private key generated for domain={}",
+                    domain_name_for_log
+                );
+                String::from_utf8_lossy(&o.stdout).to_string()
             }
-            child.wait_with_output()
-        });
-    let public_key = match pub_output {
-        Ok(o) if o.status.success() => {
-            debug!(
-                "[web] DKIM public key extracted for domain={}",
-                domain.domain
-            );
-            String::from_utf8_lossy(&o.stdout).to_string()
-        }
-        Ok(o) => {
-            error!(
-                "[web] openssl rsa -pubout failed for domain={}: {}",
-                domain.domain,
-                String::from_utf8_lossy(&o.stderr)
-            );
+            Ok(o) => {
+                error!(
+                    "[web] openssl genrsa failed for domain={}: {}",
+                    domain_name_for_log,
+                    String::from_utf8_lossy(&o.stderr)
+                );
+                return Err("Failed to generate DKIM private key.".to_string());
+            }
+            Err(e) => {
+                error!(
+                    "[web] failed to run openssl genrsa for domain={}: {}",
+                    domain_name_for_log, e
+                );
+                return Err("Failed to generate DKIM private key.".to_string());
+            }
+        };
+
+        debug!("[web] extracting public key for domain={}", domain_name_for_log);
+        let pub_output = std::process::Command::new("openssl")
+            .args(["rsa", "-pubout"])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .and_then(|mut child| {
+                use std::io::Write;
+                if let Some(ref mut stdin) = child.stdin {
+                    stdin.write_all(private_key.as_bytes()).ok();
+                }
+                child.wait_with_output()
+            });
+        let public_key = match pub_output {
+            Ok(o) if o.status.success() => {
+                debug!(
+                    "[web] DKIM public key extracted for domain={}",
+                    domain_name_for_log
+                );
+                String::from_utf8_lossy(&o.stdout).to_string()
+            }
+            Ok(o) => {
+                error!(
+                    "[web] openssl rsa -pubout failed for domain={}: {}",
+                    domain_name_for_log,
+                    String::from_utf8_lossy(&o.stderr)
+                );
+                return Err("Failed to extract DKIM public key.".to_string());
+            }
+            Err(e) => {
+                error!(
+                    "[web] failed to run openssl rsa -pubout for domain={}: {}",
+                    domain_name_for_log, e
+                );
+                return Err("Failed to extract DKIM public key.".to_string());
+            }
+        };
+        Ok((private_key, public_key))
+    })
+    .await
+    .unwrap_or_else(|e| Err(format!("DKIM generation thread failed: {}", e)));
+
+    let (private_key, public_key) = match keys {
+        Ok(k) => k,
+        Err(msg) => {
             let tmpl = ErrorTemplate {
                 nav_active: "Domains",
                 flash: None,
                 status_code: 500,
                 status_text: "Error",
                 title: "Error",
-                message: "Failed to extract DKIM public key.",
-                back_url: "/domains",
-                back_label: "Back",
-            };
-            return Html(tmpl.render().unwrap()).into_response();
-        }
-        Err(e) => {
-            error!(
-                "[web] failed to run openssl rsa -pubout for domain={}: {}",
-                domain.domain, e
-            );
-            let tmpl = ErrorTemplate {
-                nav_active: "Domains",
-                flash: None,
-                status_code: 500,
-                status_text: "Error",
-                title: "Error",
-                message: "Failed to extract DKIM public key.",
+                message: &msg,
                 back_url: "/domains",
                 back_label: "Back",
             };
@@ -482,13 +495,11 @@ pub async fn generate_dkim(
         }
     };
 
-    info!(
-        "[web] DKIM keys generated successfully for domain={}",
-        domain.domain
-    );
-    let selector = domain.dkim_selector.clone();
+    info!("[web] DKIM keys generated successfully for domain id={}", id);
     state
-        .blocking_db(move |db| db.update_domain_dkim(id, &selector, &private_key, &public_key))
+        .blocking_db(move |db| {
+            db.update_domain_dkim(id, &dkim_selector, &private_key, &public_key)
+        })
         .await;
     regen_configs(&state).await;
     fire_webhook(
@@ -783,72 +794,106 @@ pub async fn dns_check_run(
         }
     };
 
-    let dns_check = match check_type.as_str() {
-        "spf" => {
-            let spf_chain = spf_chain_recursive(&domain.domain, 0);
-            let spf_error = if spf_chain.is_empty() {
-                format!("No SPF record found for {}", domain.domain)
-            } else {
-                String::new()
-            };
+    let domain_name = domain.domain.clone();
+    let hostname = state.hostname.clone();
+    let check_type_for_blocking = check_type.clone();
+    let domain_name_for_blocking = domain_name.clone();
+    // nslookup subprocess chains are blocking and can hang on slow DNS —
+    // run them off the async runtime with a hard 15-second cap.
+    let dns_future = tokio::task::spawn_blocking(move || {
+        match check_type_for_blocking.as_str() {
+            "spf" => {
+                let spf_chain = spf_chain_recursive(&domain_name_for_blocking, 0);
+                let spf_error = if spf_chain.is_empty() {
+                    format!("No SPF record found for {}", domain_name_for_blocking)
+                } else {
+                    String::new()
+                };
+                DnsCheckResult {
+                    resolved_ip: String::new(),
+                    ptr_hostname: String::new(),
+                    ptr_matches: false,
+                    ptr_status: String::new(),
+                    spf_chain,
+                    spf_error,
+                }
+            }
+            _ => {
+                // Default: PTR
+                let host_socket_addr = format!("{}:0", hostname);
+                let resolved_ip = host_socket_addr
+                    .parse::<std::net::SocketAddr>()
+                    .map(|a| a.ip().to_string())
+                    .unwrap_or_else(|_| {
+                        use std::net::ToSocketAddrs;
+                        host_socket_addr
+                            .to_socket_addrs()
+                            .ok()
+                            .and_then(|mut it| it.next())
+                            .map(|a| a.ip().to_string())
+                            .unwrap_or_default()
+                    });
+                let (ptr_hostname, ptr_matches, ptr_status) = if resolved_ip.is_empty() {
+                    (
+                        String::new(),
+                        false,
+                        "Could not resolve hostname to IP".to_string(),
+                    )
+                } else {
+                    match query_ptr_record(&resolved_ip) {
+                        Some(ptr) => {
+                            let matches = ptr.eq_ignore_ascii_case(&hostname);
+                            let status = if matches {
+                                format!("OK — {} → {}", resolved_ip, ptr)
+                            } else {
+                                format!(
+                                    "Mismatch — PTR is \"{}\", expected \"{}\"",
+                                    ptr, hostname
+                                )
+                            };
+                            (ptr, matches, status)
+                        }
+                        None => (
+                            String::new(),
+                            false,
+                            format!("No PTR record for {}", resolved_ip),
+                        ),
+                    }
+                };
+                DnsCheckResult {
+                    resolved_ip,
+                    ptr_hostname,
+                    ptr_matches,
+                    ptr_status,
+                    spf_chain: Vec::new(),
+                    spf_error: String::new(),
+                }
+            }
+        }
+    });
+
+    let dns_check = match tokio::time::timeout(std::time::Duration::from_secs(15), dns_future).await {
+        Ok(Ok(result)) => result,
+        Ok(Err(e)) => {
+            warn!("[web] DNS check thread failed: {}", e);
             DnsCheckResult {
                 resolved_ip: String::new(),
                 ptr_hostname: String::new(),
                 ptr_matches: false,
-                ptr_status: String::new(),
-                spf_chain,
-                spf_error,
+                ptr_status: "DNS check failed".to_string(),
+                spf_chain: Vec::new(),
+                spf_error: "DNS check failed".to_string(),
             }
         }
-        _ => {
-            // Default: PTR
-            let host_socket_addr = format!("{}:0", state.hostname);
-            let resolved_ip = host_socket_addr
-                .parse::<std::net::SocketAddr>()
-                .map(|a| a.ip().to_string())
-                .unwrap_or_else(|_| {
-                    use std::net::ToSocketAddrs;
-                    host_socket_addr
-                        .to_socket_addrs()
-                        .ok()
-                        .and_then(|mut it| it.next())
-                        .map(|a| a.ip().to_string())
-                        .unwrap_or_default()
-                });
-            let (ptr_hostname, ptr_matches, ptr_status) = if resolved_ip.is_empty() {
-                (
-                    String::new(),
-                    false,
-                    "Could not resolve hostname to IP".to_string(),
-                )
-            } else {
-                match query_ptr_record(&resolved_ip) {
-                    Some(ptr) => {
-                        let matches = ptr.eq_ignore_ascii_case(&state.hostname);
-                        let status = if matches {
-                            format!("OK — {} → {}", resolved_ip, ptr)
-                        } else {
-                            format!(
-                                "Mismatch — PTR is \"{}\", expected \"{}\"",
-                                ptr, state.hostname
-                            )
-                        };
-                        (ptr, matches, status)
-                    }
-                    None => (
-                        String::new(),
-                        false,
-                        format!("No PTR record for {}", resolved_ip),
-                    ),
-                }
-            };
+        Err(_) => {
+            warn!("[web] DNS check timed out after 15s for domain={}", domain_name);
             DnsCheckResult {
-                resolved_ip,
-                ptr_hostname,
-                ptr_matches,
-                ptr_status,
+                resolved_ip: String::new(),
+                ptr_hostname: String::new(),
+                ptr_matches: false,
+                ptr_status: "DNS check timed out".to_string(),
                 spf_chain: Vec::new(),
-                spf_error: String::new(),
+                spf_error: "DNS check timed out".to_string(),
             }
         }
     };

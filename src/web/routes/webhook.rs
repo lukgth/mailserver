@@ -14,6 +14,20 @@ use crate::web::AppState;
 
 const PAGE_SIZE: i64 = 50;
 
+/// Truncate a body to at most 1024 characters (at a char boundary) before
+/// storing it in the webhook log, bounding log-row size.
+fn truncate_body(s: &str) -> String {
+    const MAX_BODY: usize = 1024;
+    if s.len() <= MAX_BODY {
+        return s.to_string();
+    }
+    let mut end = MAX_BODY;
+    while !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    s[..end].to_string()
+}
+
 // ── Query params ──
 
 #[derive(Deserialize)]
@@ -143,19 +157,27 @@ pub async fn update_webhook(
         auth.admin.username
     );
     let url = form.webhook_url.trim().to_string();
-    // Validate: must be empty or start with http:// or https://
-    if !url.is_empty() && !url.starts_with("http://") && !url.starts_with("https://") {
-        let tmpl = ErrorTemplate {
-            nav_active: "Webhooks",
-            flash: None,
-            status_code: 400,
-            status_text: "Bad Request",
-            title: "Error",
-            message: "Webhook URL must start with http:// or https://",
-            back_url: "/webhooks",
-            back_label: "Back",
-        };
-        return Html(tmpl.render().unwrap()).into_response();
+    // Validate: empty clears the hook; otherwise the URL must pass the
+    // outbound SSRF validation (https-only, resolvable, non-private host).
+    // The check itself resolves DNS, so run it off the async runtime.
+    if !url.is_empty() {
+        let check_url = url.clone();
+        let valid = tokio::task::spawn_blocking(move || crate::web::validate_outbound_url(&check_url))
+            .await
+            .unwrap_or(false);
+        if !valid {
+            let tmpl = ErrorTemplate {
+                nav_active: "Webhooks",
+                flash: None,
+                status_code: 400,
+                status_text: "Bad Request",
+                title: "Error",
+                message: "Webhook URL must be a valid HTTPS URL to a public host.",
+                back_url: "/webhooks",
+                back_label: "Back",
+            };
+            return Html(tmpl.render().unwrap()).into_response();
+        }
     }
     let url_for_db = url.clone();
     state
@@ -200,6 +222,26 @@ pub async fn test_webhook(auth: AuthAdmin, State(state): State<AppState>) -> Res
         return Html(tmpl.render().unwrap()).into_response();
     }
 
+    // Re-validate the stored URL before making any outbound request.
+    // The check resolves DNS, so run it off the async runtime.
+    let check_url = webhook_url.clone();
+    let url_valid = tokio::task::spawn_blocking(move || crate::web::validate_outbound_url(&check_url))
+        .await
+        .unwrap_or(false);
+    if !url_valid {
+        let tmpl = ErrorTemplate {
+            nav_active: "Webhooks",
+            flash: None,
+            status_code: 400,
+            status_text: "Bad Request",
+            title: "Invalid Webhook URL",
+            message: "The configured webhook URL is not a valid HTTPS URL to a public host. Update it in the webhook settings first.",
+            back_url: "/webhooks",
+            back_label: "Back to Webhooks",
+        };
+        return Html(tmpl.render().unwrap()).into_response();
+    }
+
     let timestamp = chrono::Utc::now().to_rfc3339();
     let payload = serde_json::json!({
         "event": "test",
@@ -218,32 +260,29 @@ pub async fn test_webhook(auth: AuthAdmin, State(state): State<AppState>) -> Res
     let request_body = payload.to_string();
 
     let start = std::time::Instant::now();
-    let result = reqwest::blocking::Client::builder()
-        .timeout(std::time::Duration::from_secs(10))
-        .build()
-        .map_err(|e| e.to_string())
-        .and_then(|client| {
-            client
-                .post(&webhook_url)
-                .json(&payload)
-                .send()
-                .map_err(|e| e.to_string())
-        });
+    let url_for_call = webhook_url.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        reqwest::blocking::Client::builder()
+            .timeout(std::time::Duration::from_secs(10))
+            .build()
+            .map_err(|e| e.to_string())
+            .and_then(|client| {
+                client
+                    .post(&url_for_call)
+                    .json(&payload)
+                    .send()
+                    .map_err(|e| e.to_string())
+            })
+    })
+    .await
+    .unwrap_or_else(|e| Err(format!("webhook test thread failed: {}", e)));
     let duration_ms = start.elapsed().as_millis() as i64;
 
     let (response_status, response_body, error_msg) = match result {
         Ok(resp) => {
             let status = resp.status().as_u16() as i32;
             let body = resp.text().unwrap_or_default();
-            let body_truncated = if body.len() > 2048 {
-                let mut end = 2048;
-                while !body.is_char_boundary(end) {
-                    end -= 1;
-                }
-                body[..end].to_string()
-            } else {
-                body
-            };
+            let body_truncated = truncate_body(&body);
             info!(
                 "[web] test webhook delivered to {} status={}",
                 webhook_url, status
@@ -256,9 +295,9 @@ pub async fn test_webhook(auth: AuthAdmin, State(state): State<AppState>) -> Res
         }
     };
 
-    // Log the test execution to the database
+    // Log the test execution to the database (request/response bodies capped)
     let url_clone = webhook_url.clone();
-    let rb_clone = request_body.clone();
+    let rb_clone = truncate_body(&request_body);
     let rb2_clone = response_body.clone();
     let err_clone = error_msg.clone();
     state
@@ -357,6 +396,26 @@ pub async fn retry_webhook(
         return Html(tmpl.render().unwrap()).into_response();
     }
 
+    // Re-validate the logged URL before making any outbound request (SSRF guard).
+    // The check resolves DNS, so run it off the async runtime.
+    let check_url = entry.url.clone();
+    let url_valid = tokio::task::spawn_blocking(move || crate::web::validate_outbound_url(&check_url))
+        .await
+        .unwrap_or(false);
+    if !url_valid {
+        let tmpl = ErrorTemplate {
+            nav_active: "Webhooks",
+            flash: None,
+            status_code: 400,
+            status_text: "Bad Request",
+            title: "Invalid URL",
+            message: "This webhook log entry points to a URL that is no longer valid (https-only, public host).",
+            back_url: "/webhooks",
+            back_label: "Back to Webhooks",
+        };
+        return Html(tmpl.render().unwrap()).into_response();
+    }
+
     // Re-send the original request body, or fall back to an empty JSON object.
     let request_body = if entry.request_body.is_empty() {
         "{}".to_string()
@@ -369,32 +428,29 @@ pub async fn retry_webhook(
     let payload: serde_json::Value =
         serde_json::from_str(&request_body).unwrap_or(serde_json::json!({}));
 
-    let result = reqwest::blocking::Client::builder()
-        .timeout(std::time::Duration::from_secs(10))
-        .build()
-        .map_err(|e| e.to_string())
-        .and_then(|client| {
-            client
-                .post(&url)
-                .json(&payload)
-                .send()
-                .map_err(|e| e.to_string())
-        });
+    let url_for_call = url.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        reqwest::blocking::Client::builder()
+            .timeout(std::time::Duration::from_secs(10))
+            .build()
+            .map_err(|e| e.to_string())
+            .and_then(|client| {
+                client
+                    .post(&url_for_call)
+                    .json(&payload)
+                    .send()
+                    .map_err(|e| e.to_string())
+            })
+    })
+    .await
+    .unwrap_or_else(|e| Err(format!("webhook retry thread failed: {}", e)));
     let duration_ms = start.elapsed().as_millis() as i64;
 
     let (response_status, response_body, error_msg) = match result {
         Ok(resp) => {
             let status = resp.status().as_u16() as i32;
             let body = resp.text().unwrap_or_default();
-            let body_truncated = if body.len() > 2048 {
-                let mut end = 2048;
-                while !body.is_char_boundary(end) {
-                    end -= 1;
-                }
-                body[..end].to_string()
-            } else {
-                body
-            };
+            let body_truncated = truncate_body(&body);
             info!(
                 "[web] retry webhook delivered to {} status={}",
                 url, status
@@ -408,7 +464,7 @@ pub async fn retry_webhook(
     };
 
     let url_clone = url.clone();
-    let rb_clone = request_body.clone();
+    let rb_clone = truncate_body(&request_body);
     let rb2_clone = response_body.clone();
     let err_clone = error_msg.clone();
     let sender_clone = entry.sender.clone();

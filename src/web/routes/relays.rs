@@ -78,6 +78,38 @@ pub async fn create(
     State(state): State<AppState>,
     Form(form): Form<RelayForm>,
 ) -> Response {
+    let name = match crate::web::forms::validate_display_name(&form.name) {
+        Ok(n) => n,
+        Err(e) => {
+            let tmpl = ErrorTemplate {
+                nav_active: "Relays",
+                flash: None,
+                status_code: 400,
+                status_text: "Bad Request",
+                title: "Error",
+                message: &e,
+                back_url: "/relays/new",
+                back_label: "Back",
+            };
+            return Html(tmpl.render().unwrap()).into_response();
+        }
+    };
+    let host = match crate::web::forms::validate_relay_host(&form.host) {
+        Ok(h) => h,
+        Err(e) => {
+            let tmpl = ErrorTemplate {
+                nav_active: "Relays",
+                flash: None,
+                status_code: 400,
+                status_text: "Bad Request",
+                title: "Error",
+                message: &e,
+                back_url: "/relays/new",
+                back_label: "Back",
+            };
+            return Html(tmpl.render().unwrap()).into_response();
+        }
+    };
     let port = form.port.unwrap_or(587);
     let auth_type = if form.auth_type.is_empty() {
         "none".to_string()
@@ -86,11 +118,9 @@ pub async fn create(
     };
     info!(
         "[web] POST /relays — creating relay name={} host={}:{} auth={}",
-        form.name, form.host, port, auth_type
+        name, host, port, auth_type
     );
 
-    let name = form.name.clone();
-    let host = form.host.clone();
     let username = form
         .username
         .as_deref()
@@ -169,6 +199,38 @@ pub async fn update(
     Path(id): Path<i64>,
     Form(form): Form<RelayEditForm>,
 ) -> Response {
+    let name = match crate::web::forms::validate_display_name(&form.name) {
+        Ok(n) => n,
+        Err(e) => {
+            let tmpl = ErrorTemplate {
+                nav_active: "Relays",
+                flash: None,
+                status_code: 400,
+                status_text: "Bad Request",
+                title: "Error",
+                message: &e,
+                back_url: &format!("/relays/{}/edit", id),
+                back_label: "Back",
+            };
+            return Html(tmpl.render().unwrap()).into_response();
+        }
+    };
+    let host = match crate::web::forms::validate_relay_host(&form.host) {
+        Ok(h) => h,
+        Err(e) => {
+            let tmpl = ErrorTemplate {
+                nav_active: "Relays",
+                flash: None,
+                status_code: 400,
+                status_text: "Bad Request",
+                title: "Error",
+                message: &e,
+                back_url: &format!("/relays/{}/edit", id),
+                back_label: "Back",
+            };
+            return Html(tmpl.render().unwrap()).into_response();
+        }
+    };
     let port = form.port.unwrap_or(587);
     let active = form.active.is_some();
     let auth_type = if form.auth_type.is_empty() {
@@ -178,11 +240,9 @@ pub async fn update(
     };
     info!(
         "[web] POST /relays/{} — updating relay name={} host={}:{} auth={} active={}",
-        id, form.name, form.host, port, auth_type, active
+        id, name, host, port, auth_type, active
     );
 
-    let name = form.name.clone();
-    let host = form.host.clone();
     let username = form
         .username
         .as_deref()

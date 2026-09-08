@@ -409,32 +409,44 @@ pub async fn reports(
 
     let reports = if is_safe_path_component(&domain) && is_safe_path_component(&username) {
         let maildir_base = maildir_path(&domain, &username);
-        read_bounce_reports(&maildir_base, &mut logs, |report| {
-            fire_webhook(
-                &webhook_state,
-                "bounce.report.parsed",
-                serde_json::json!({
-                    "inbox_id": inbox_for_webhook.id,
-                    "label": inbox_for_webhook.label,
-                    "account": format!(
-                        "{}@{}",
-                        inbox_for_webhook
-                            .account_username
-                            .as_deref()
-                            .unwrap_or_default(),
-                        inbox_for_webhook
-                            .account_domain
-                            .as_deref()
-                            .unwrap_or_default()
-                    ),
-                    "action": report.fields.action,
-                    "status": report.fields.status,
-                    "final_recipient": report.fields.final_recipient,
-                    "diagnostic_code": report.fields.diagnostic_code,
-                    "remote_mta": report.fields.remote_mta,
-                }),
-            );
+        let webhook_state = webhook_state.clone();
+        let inbox_for_webhook = inbox_for_webhook.clone();
+        // Maildir scan + MIME parsing is blocking file I/O — run it off the
+        // async runtime.
+        let (reports, scan_logs) = tokio::task::spawn_blocking(move || {
+            let mut scan_logs: Vec<String> = Vec::new();
+            let reports = read_bounce_reports(&maildir_base, &mut scan_logs, |report| {
+                fire_webhook(
+                    &webhook_state,
+                    "bounce.report.parsed",
+                    serde_json::json!({
+                        "inbox_id": inbox_for_webhook.id,
+                        "label": inbox_for_webhook.label,
+                        "account": format!(
+                            "{}@{}",
+                            inbox_for_webhook
+                                .account_username
+                                .as_deref()
+                                .unwrap_or_default(),
+                            inbox_for_webhook
+                                .account_domain
+                                .as_deref()
+                                .unwrap_or_default()
+                        ),
+                        "action": report.fields.action,
+                        "status": report.fields.status,
+                        "final_recipient": report.fields.final_recipient,
+                        "diagnostic_code": report.fields.diagnostic_code,
+                        "remote_mta": report.fields.remote_mta,
+                    }),
+                );
+            });
+            (reports, scan_logs)
         })
+        .await
+        .unwrap_or_default();
+        logs.extend(scan_logs);
+        reports
     } else {
         warn!(
             "[web] unsafe path component: domain={}, username={}",

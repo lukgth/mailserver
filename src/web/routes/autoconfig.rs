@@ -5,10 +5,26 @@ use axum::{
 
 use crate::web::AppState;
 
+/// Escape XML-special characters so a hostname cannot inject XML markup.
+fn xml_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&apos;"),
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
 /// Thunderbird autoconfig XML endpoint.
 /// Returns ISPDB-style XML so Thunderbird configures IMAP+SMTP correctly.
 pub async fn autoconfig(State(state): State<AppState>) -> impl IntoResponse {
-    let hostname = &state.hostname;
+    let hostname = xml_escape(&state.hostname);
     let xml = format!(
         r#"<?xml version="1.0"?>
 <clientConfig version="1.1">

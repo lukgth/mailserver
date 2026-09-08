@@ -158,6 +158,38 @@ pub async fn create(
         "[web] POST /accounts — creating account username={}, domain_id={}",
         form.username, form.domain_id
     );
+    let username = match crate::web::forms::validate_username(&form.username) {
+        Ok(u) => u,
+        Err(e) => {
+            let tmpl = ErrorTemplate {
+                nav_active: "Accounts",
+                flash: None,
+                status_code: 400,
+                status_text: "Bad Request",
+                title: "Error",
+                message: &e,
+                back_url: "/accounts/new",
+                back_label: "Back",
+            };
+            return Html(tmpl.render().unwrap()).into_response();
+        }
+    };
+    let name = match crate::web::forms::validate_display_name(&form.name) {
+        Ok(n) => n,
+        Err(e) => {
+            let tmpl = ErrorTemplate {
+                nav_active: "Accounts",
+                flash: None,
+                status_code: 400,
+                status_text: "Bad Request",
+                title: "Error",
+                message: &e,
+                back_url: "/accounts/new",
+                back_label: "Back",
+            };
+            return Html(tmpl.render().unwrap()).into_response();
+        }
+    };
     if let Err(e) = crate::auth::validate_password_length(&form.password) {
         error!("[web] password validation failed for {}: {}", form.username, e);
         let tmpl = ErrorTemplate {
@@ -194,27 +226,29 @@ pub async fn create(
     };
     let quota = form.quota.unwrap_or(0);
     let domain_id = form.domain_id;
-    let username = form.username.clone();
-    let name = form.name.clone();
+    let username_for_db = username.clone();
+    let name_for_db = name.clone();
     let create_result = state
-        .blocking_db(move |db| db.create_account(domain_id, &username, &db_hash, &name, quota))
+        .blocking_db(move |db| {
+            db.create_account(domain_id, &username_for_db, &db_hash, &name_for_db, quota)
+        })
         .await;
     match create_result {
         Ok(id) => {
             info!(
                 "[web] account created successfully: {} (id={})",
-                form.username, id
+                username, id
             );
             regen_configs(&state).await;
             fire_webhook(
                 &state,
                 "account.created",
-                serde_json::json!({"username": form.username, "domain_id": form.domain_id}),
+                serde_json::json!({"username": username, "domain_id": domain_id}),
             );
             Redirect::to("/accounts").into_response()
         }
         Err(e) => {
-            error!("[web] failed to create account {}: {}", form.username, e);
+            error!("[web] failed to create account {}: {}", username, e);
             let tmpl = ErrorTemplate {
                 nav_active: "Accounts",
                 flash: None,
@@ -270,11 +304,26 @@ pub async fn update(
 ) -> Response {
     let active = form.active.is_some();
     let quota = form.quota.unwrap_or(0);
+    let name = match crate::web::forms::validate_display_name(&form.name) {
+        Ok(n) => n,
+        Err(e) => {
+            let tmpl = ErrorTemplate {
+                nav_active: "Accounts",
+                flash: None,
+                status_code: 400,
+                status_text: "Bad Request",
+                title: "Error",
+                message: &e,
+                back_url: &format!("/accounts/{}/edit", id),
+                back_label: "Back",
+            };
+            return Html(tmpl.render().unwrap()).into_response();
+        }
+    };
     info!(
         "[web] POST /accounts/{} — updating account active={}, quota={}",
         id, active, quota
     );
-    let name = form.name.clone();
     state
         .blocking_db(move |db| db.update_account(id, &name, active, quota))
         .await;
@@ -311,8 +360,39 @@ pub async fn delete(
     Path(id): Path<i64>,
 ) -> Response {
     warn!("[web] POST /accounts/{}/delete — deleting account", id);
-    state.blocking_db(move |db| db.delete_account(id)).await;
-    regen_configs(&state).await;
-    fire_webhook(&state, "account.deleted", serde_json::json!({"id": id}));
-    Redirect::to("/accounts").into_response()
+    match state.blocking_db(move |db| db.delete_account(id)).await {
+        Ok(true) => {
+            regen_configs(&state).await;
+            fire_webhook(&state, "account.deleted", serde_json::json!({"id": id}));
+            Redirect::to("/accounts").into_response()
+        }
+        Ok(false) => {
+            // The account backs a dmarc/abuse/bounce report inbox.
+            let tmpl = ErrorTemplate {
+                nav_active: "Accounts",
+                flash: None,
+                status_code: 409,
+                status_text: "Conflict",
+                title: "Cannot Delete Account",
+                message: "Account backs a report inbox and cannot be deleted.",
+                back_url: "/accounts",
+                back_label: "Back",
+            };
+            Html(tmpl.render().unwrap()).into_response()
+        }
+        Err(e) => {
+            error!("[web] failed to delete account id={}: {}", id, e);
+            let tmpl = ErrorTemplate {
+                nav_active: "Accounts",
+                flash: None,
+                status_code: 500,
+                status_text: "Error",
+                title: "Error",
+                message: &e,
+                back_url: "/accounts",
+                back_label: "Back",
+            };
+            Html(tmpl.render().unwrap()).into_response()
+        }
+    }
 }

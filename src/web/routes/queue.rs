@@ -6,7 +6,6 @@ use axum::{
 };
 use log::{debug, error, warn};
 use std::path::Path as FsPath;
-use std::process::Command;
 
 use crate::web::auth::AuthAdmin;
 use crate::web::AppState;
@@ -24,6 +23,22 @@ fn find_postsuper_bin() -> Option<&'static str> {
     POSTSUPER_PATHS
         .into_iter()
         .find(|path| FsPath::new(path).exists())
+}
+
+/// Run a postqueue/postsuper subprocess off the async runtime; the commands
+/// can block on a busy Postfix queue.
+async fn run_post_command(
+    bin: &'static str,
+    args: Vec<String>,
+) -> Result<std::process::Output, String> {
+    tokio::task::spawn_blocking(move || {
+        std::process::Command::new(bin)
+            .args(&args)
+            .output()
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| format!("command thread failed: {}", e))?
 }
 
 /// A single entry parsed from the `postqueue -p` output.
@@ -152,7 +167,8 @@ pub async fn list(auth: AuthAdmin, State(_state): State<AppState>) -> Html<Strin
     let postqueue_bin = find_postqueue_bin();
 
     let (entries, queue_summary, error) = match postqueue_bin {
-        Some(postqueue_bin) => match Command::new(postqueue_bin).arg("-p").output() {
+        Some(postqueue_bin) => match run_post_command(postqueue_bin, vec!["-p".to_string()]).await
+        {
             Ok(output) if output.status.success() => {
                 let raw = String::from_utf8_lossy(&output.stdout).to_string();
                 let summary = raw
@@ -227,7 +243,7 @@ pub async fn flush(auth: AuthAdmin, headers: HeaderMap) -> Response {
     }
 
     match find_postqueue_bin() {
-        Some(postqueue_bin) => match Command::new(postqueue_bin).arg("-f").output() {
+        Some(postqueue_bin) => match run_post_command(postqueue_bin, vec!["-f".to_string()]).await {
             Ok(output) if output.status.success() => {
                 debug!("[web] queue flush command completed successfully");
             }
@@ -260,21 +276,23 @@ pub async fn purge(auth: AuthAdmin, headers: HeaderMap) -> Response {
     }
 
     match find_postsuper_bin() {
-        Some(postsuper_bin) => match Command::new(postsuper_bin).args(["-d", "ALL"]).output() {
-            Ok(output) if output.status.success() => {
-                debug!("[web] queue purge command completed successfully");
+        Some(postsuper_bin) => {
+            match run_post_command(postsuper_bin, vec!["-d".to_string(), "ALL".to_string()]).await {
+                Ok(output) if output.status.success() => {
+                    debug!("[web] queue purge command completed successfully");
+                }
+                Ok(output) => {
+                    error!(
+                        "[web] queue purge failed with status {}: {}",
+                        output.status,
+                        String::from_utf8_lossy(&output.stderr)
+                    );
+                }
+                Err(e) => {
+                    error!("[web] failed to run queue purge command: {}", e);
+                }
             }
-            Ok(output) => {
-                error!(
-                    "[web] queue purge failed with status {}: {}",
-                    output.status,
-                    String::from_utf8_lossy(&output.stderr)
-                );
-            }
-            Err(e) => {
-                error!("[web] failed to run queue purge command: {}", e);
-            }
-        },
+        }
         None => error!("[web] postsuper binary not found; queue purge unavailable"),
     }
 
@@ -302,22 +320,24 @@ pub async fn delete_message(
     }
 
     match find_postsuper_bin() {
-        Some(postsuper_bin) => match Command::new(postsuper_bin).args(["-d", &id]).output() {
-            Ok(output) if output.status.success() => {
-                debug!("[web] deleted queue message {}", id);
+        Some(postsuper_bin) => {
+            match run_post_command(postsuper_bin, vec!["-d".to_string(), id.clone()]).await {
+                Ok(output) if output.status.success() => {
+                    debug!("[web] deleted queue message {}", id);
+                }
+                Ok(output) => {
+                    error!(
+                        "[web] queue delete {} failed with status {}: {}",
+                        id,
+                        output.status,
+                        String::from_utf8_lossy(&output.stderr)
+                    );
+                }
+                Err(e) => {
+                    error!("[web] failed to run postsuper for message {}: {}", id, e);
+                }
             }
-            Ok(output) => {
-                error!(
-                    "[web] queue delete {} failed with status {}: {}",
-                    id,
-                    output.status,
-                    String::from_utf8_lossy(&output.stderr)
-                );
-            }
-            Err(e) => {
-                error!("[web] failed to run postsuper for message {}: {}", id, e);
-            }
-        },
+        }
         None => error!("[web] postsuper binary not found; message delete unavailable"),
     }
 
@@ -348,22 +368,24 @@ pub async fn flush_message(
     }
 
     match find_postqueue_bin() {
-        Some(postqueue_bin) => match Command::new(postqueue_bin).args(["-i", &id]).output() {
-            Ok(output) if output.status.success() => {
-                debug!("[web] flushed queue message {}", id);
+        Some(postqueue_bin) => {
+            match run_post_command(postqueue_bin, vec!["-i".to_string(), id.clone()]).await {
+                Ok(output) if output.status.success() => {
+                    debug!("[web] flushed queue message {}", id);
+                }
+                Ok(output) => {
+                    error!(
+                        "[web] queue flush-message {} failed with status {}: {}",
+                        id,
+                        output.status,
+                        String::from_utf8_lossy(&output.stderr)
+                    );
+                }
+                Err(e) => {
+                    error!("[web] failed to run postqueue -i for message {}: {}", id, e);
+                }
             }
-            Ok(output) => {
-                error!(
-                    "[web] queue flush-message {} failed with status {}: {}",
-                    id,
-                    output.status,
-                    String::from_utf8_lossy(&output.stderr)
-                );
-            }
-            Err(e) => {
-                error!("[web] failed to run postqueue -i for message {}: {}", id, e);
-            }
-        },
+        }
         None => error!("[web] postqueue binary not found; message flush unavailable"),
     }
 

@@ -39,36 +39,27 @@ fn same_origin(headers: &HeaderMap) -> bool {
 }
 
 fn is_valid_ip_or_cidr(input: &str) -> bool {
+    use std::net::IpAddr;
     let trimmed = input.trim();
     if trimmed.is_empty() {
         return false;
     }
-    // Allow IP addresses and CIDR notation (e.g., 192.168.1.0/24)
-    let ip_part = if let Some((ip, prefix)) = trimmed.split_once('/') {
-        if let Ok(p) = prefix.parse::<u8>() {
-            if p > 128 {
-                return false;
+    // Accept a bare IP address or CIDR notation (e.g. 192.168.1.0/24,
+    // 2001:db8::/32). Prefix must be 0..=32 for IPv4, 0..=128 for IPv6.
+    match trimmed.split_once('/') {
+        Some((ip, prefix)) => {
+            let prefix = match prefix.parse::<u8>() {
+                Ok(p) => p,
+                Err(_) => return false,
+            };
+            match ip.parse::<IpAddr>() {
+                Ok(IpAddr::V4(_)) => prefix <= 32,
+                Ok(IpAddr::V6(_)) => prefix <= 128,
+                Err(_) => false,
             }
-        } else {
-            return false;
         }
-        ip
-    } else {
-        trimmed
-    };
-
-    // Validate IPv4
-    let parts: Vec<&str> = ip_part.split('.').collect();
-    if parts.len() == 4 {
-        return parts.iter().all(|p| p.parse::<u8>().is_ok());
+        None => trimmed.parse::<IpAddr>().is_ok(),
     }
-
-    // Validate IPv6 (basic check)
-    if ip_part.contains(':') {
-        return ip_part.split(':').count() >= 2;
-    }
-
-    false
 }
 
 // ── Templates ──

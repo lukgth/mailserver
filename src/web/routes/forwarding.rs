@@ -86,10 +86,44 @@ pub async fn create(
         form.source, form.destination, keep_copy
     );
 
+    // Shape/length validation before any lookups (rejects CR/LF and control chars).
+    let source = match crate::web::forms::validate_mail_address(&form.source, false) {
+        Ok(v) => v,
+        Err(e) => {
+            let tmpl = ErrorTemplate {
+                nav_active: "Forwarding",
+                flash: None,
+                status_code: 400,
+                status_text: "Invalid Source Email",
+                title: "Invalid Source Email",
+                message: &e,
+                back_url: "/forwarding/new",
+                back_label: "Back",
+            };
+            return Html(tmpl.render().unwrap()).into_response();
+        }
+    };
+    let destination = match crate::web::forms::validate_mail_address(&form.destination, false) {
+        Ok(v) => v,
+        Err(e) => {
+            let tmpl = ErrorTemplate {
+                nav_active: "Forwarding",
+                flash: None,
+                status_code: 400,
+                status_text: "Invalid Destination",
+                title: "Invalid Destination",
+                message: &e,
+                back_url: "/forwarding/new",
+                back_label: "Back",
+            };
+            return Html(tmpl.render().unwrap()).into_response();
+        }
+    };
+
     // Extract domain from source email
-    let source_parts: Vec<&str> = form.source.split('@').collect();
+    let source_parts: Vec<&str> = source.split('@').collect();
     if source_parts.len() != 2 {
-        warn!("[web] invalid source email format: {}", form.source);
+        warn!("[web] invalid source email format: {}", source);
         let tmpl = ErrorTemplate {
             nav_active: "Forwarding",
             flash: None,
@@ -98,7 +132,7 @@ pub async fn create(
             title: "Invalid Source Email",
             message: &format!(
                 "The source email '{}' is not valid. Use the format 'user@domain.com'.",
-                form.source
+                source
             ),
             back_url: "/forwarding/new",
             back_label: "Back",
@@ -137,30 +171,30 @@ pub async fn create(
     };
 
     let domain_id = domain.id;
-    let source = form.source.clone();
-    let destination = form.destination.clone();
+    let source_for_db = source.clone();
+    let destination_for_db = destination.clone();
     let create_result = state
-        .blocking_db(move |db| db.create_forwarding(domain_id, &source, &destination, keep_copy))
+        .blocking_db(move |db| db.create_forwarding(domain_id, &source_for_db, &destination_for_db, keep_copy))
         .await;
 
     match create_result {
         Ok(id) => {
             info!(
                 "[web] forwarding created: {} -> {} (id={}, keep_copy={})",
-                form.source, form.destination, id, keep_copy
+                source, destination, id, keep_copy
             );
             regen_configs(&state).await;
             fire_webhook(
                 &state,
                 "forwarding.created",
-                serde_json::json!({"source": form.source, "destination": form.destination}),
+                serde_json::json!({"source": source, "destination": destination}),
             );
             Redirect::to("/forwarding").into_response()
         }
         Err(e) => {
             error!(
                 "[web] failed to create forwarding {} -> {}: {}",
-                form.source, form.destination, e
+                source, destination, e
             );
             let tmpl = ErrorTemplate {
                 nav_active: "Forwarding",
@@ -206,12 +240,42 @@ pub async fn update(
 ) -> Response {
     let active = form.active.is_some();
     let keep_copy = form.keep_copy.is_some();
+    let source = match crate::web::forms::validate_mail_address(&form.source, false) {
+        Ok(v) => v,
+        Err(e) => {
+            let tmpl = ErrorTemplate {
+                nav_active: "Forwarding",
+                flash: None,
+                status_code: 400,
+                status_text: "Invalid Source Email",
+                title: "Invalid Source Email",
+                message: &e,
+                back_url: &format!("/forwarding/{}/edit", id),
+                back_label: "Back",
+            };
+            return Html(tmpl.render().unwrap()).into_response();
+        }
+    };
+    let destination = match crate::web::forms::validate_mail_address(&form.destination, false) {
+        Ok(v) => v,
+        Err(e) => {
+            let tmpl = ErrorTemplate {
+                nav_active: "Forwarding",
+                flash: None,
+                status_code: 400,
+                status_text: "Invalid Destination",
+                title: "Invalid Destination",
+                message: &e,
+                back_url: &format!("/forwarding/{}/edit", id),
+                back_label: "Back",
+            };
+            return Html(tmpl.render().unwrap()).into_response();
+        }
+    };
     info!(
         "[web] POST /forwarding/{} — updating forwarding source={}, destination={}, active={}, keep_copy={}",
-        id, form.source, form.destination, active, keep_copy
+        id, source, destination, active, keep_copy
     );
-    let source = form.source.clone();
-    let destination = form.destination.clone();
     state
         .blocking_db(move |db| db.update_forwarding(id, &source, &destination, active, keep_copy))
         .await;

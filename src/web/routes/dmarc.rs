@@ -75,31 +75,73 @@ pub struct DmarcReport {
 
 // ── DMARC XML parsing ──
 
+/// Maximum decompressed size accepted for a single DMARC report attachment.
+const MAX_DMARC_XML_BYTES: u64 = 16 * 1024 * 1024; // 16 MiB
+/// Maximum number of entries inspected inside a report ZIP archive.
+const MAX_ZIP_ENTRIES: usize = 20;
+
 /// Extract and decompress a DMARC XML report from email attachment bytes.
 /// Returns the raw XML bytes on success.
 fn decompress_dmarc_attachment(name: &str, data: &[u8]) -> Option<Vec<u8>> {
     let lower = name.to_lowercase();
     if lower.ends_with(".zip") {
-        // ZIP archive
+        // ZIP archive: bounded entry count and per-entry decompressed size.
         let cursor = std::io::Cursor::new(data);
         let mut archive = zip::ZipArchive::new(cursor).ok()?;
-        for i in 0..archive.len() {
-            let mut file = archive.by_index(i).ok()?;
+        let entries = archive.len().min(MAX_ZIP_ENTRIES);
+        if archive.len() > MAX_ZIP_ENTRIES {
+            warn!(
+                "[dmarc] ZIP '{}' has {} entries; only inspecting the first {}",
+                name,
+                archive.len(),
+                MAX_ZIP_ENTRIES
+            );
+        }
+        for i in 0..entries {
+            let file = archive.by_index(i).ok()?;
             let fname = file.name().to_lowercase();
             if fname.ends_with(".xml") {
                 let mut buf = Vec::new();
-                file.read_to_end(&mut buf).ok()?;
+                let entry_name = file.name().to_string();
+                let mut limited = file.take(MAX_DMARC_XML_BYTES + 1);
+                if limited.read_to_end(&mut buf).ok()? > MAX_DMARC_XML_BYTES as usize {
+                    warn!(
+                        "[dmarc] ZIP entry '{}' in '{}' exceeds {} bytes; skipping",
+                        entry_name,
+                        name,
+                        MAX_DMARC_XML_BYTES
+                    );
+                    return None;
+                }
                 return Some(buf);
             }
         }
         None
     } else if lower.ends_with(".gz") || lower.ends_with(".xml.gz") {
-        // Gzip compressed
-        let mut decoder = flate2::read::GzDecoder::new(data);
+        // Gzip compressed: bounded decompression to prevent zip-bombs.
+        let decoder = flate2::read::GzDecoder::new(data);
         let mut buf = Vec::new();
-        decoder.read_to_end(&mut buf).ok()?;
+        if decoder
+            .take(MAX_DMARC_XML_BYTES + 1)
+            .read_to_end(&mut buf)
+            .ok()?
+            > MAX_DMARC_XML_BYTES as usize
+        {
+            warn!(
+                "[dmarc] gzip attachment '{}' decompresses beyond {} bytes; skipping",
+                name, MAX_DMARC_XML_BYTES
+            );
+            return None;
+        }
         Some(buf)
     } else if lower.ends_with(".xml") {
+        if data.len() as u64 > MAX_DMARC_XML_BYTES {
+            warn!(
+                "[dmarc] raw XML attachment '{}' exceeds {} bytes; skipping",
+                name, MAX_DMARC_XML_BYTES
+            );
+            return None;
+        }
         Some(data.to_vec())
     } else {
         None
@@ -495,40 +537,52 @@ pub async fn reports(
 
     let reports = if is_safe_path_component(&domain) && is_safe_path_component(&username) {
         let maildir_base = maildir_path(&domain, &username);
-        read_dmarc_reports(&maildir_base, &mut logs, |report| {
-            let key = if report.meta.report_id.is_empty() {
-                report.email_filename.clone()
-            } else {
-                report.meta.report_id.clone()
-            };
-            if seen_report_ids.insert(key) {
-                fire_webhook(
-                    &webhook_state,
-                    "dmarc.report.parsed",
-                    serde_json::json!({
-                        "inbox_id": inbox_for_webhook.id,
-                        "label": inbox_for_webhook.label,
-                        "account": format!(
-                            "{}@{}",
-                            inbox_for_webhook
-                                .account_username
-                                .as_deref()
-                                .unwrap_or_default(),
-                            inbox_for_webhook
-                                .account_domain
-                                .as_deref()
-                                .unwrap_or_default()
-                        ),
-                        "report_id": report.meta.report_id,
-                        "org_name": report.meta.org_name,
-                        "policy_domain": report.policy.domain,
-                        "date_begin": report.meta.date_begin,
-                        "date_end": report.meta.date_end,
-                        "record_count": report.records.len(),
-                    }),
-                );
-            }
+        let webhook_state = webhook_state.clone();
+        let inbox_for_webhook = inbox_for_webhook.clone();
+        // Maildir scan + decompression is blocking file I/O — run it off the
+        // async runtime.
+        let (reports, scan_logs) = tokio::task::spawn_blocking(move || {
+            let mut scan_logs: Vec<String> = Vec::new();
+            let reports = read_dmarc_reports(&maildir_base, &mut scan_logs, |report| {
+                let key = if report.meta.report_id.is_empty() {
+                    report.email_filename.clone()
+                } else {
+                    report.meta.report_id.clone()
+                };
+                if seen_report_ids.insert(key) {
+                    fire_webhook(
+                        &webhook_state,
+                        "dmarc.report.parsed",
+                        serde_json::json!({
+                            "inbox_id": inbox_for_webhook.id,
+                            "label": inbox_for_webhook.label,
+                            "account": format!(
+                                "{}@{}",
+                                inbox_for_webhook
+                                    .account_username
+                                    .as_deref()
+                                    .unwrap_or_default(),
+                                inbox_for_webhook
+                                    .account_domain
+                                    .as_deref()
+                                    .unwrap_or_default()
+                            ),
+                            "report_id": report.meta.report_id,
+                            "org_name": report.meta.org_name,
+                            "policy_domain": report.policy.domain,
+                            "date_begin": report.meta.date_begin,
+                            "date_end": report.meta.date_end,
+                            "record_count": report.records.len(),
+                        }),
+                    );
+                }
+            });
+            (reports, scan_logs)
         })
+        .await
+        .unwrap_or_default();
+        logs.extend(scan_logs);
+        reports
     } else {
         warn!(
             "[web] unsafe path component: domain={}, username={}",

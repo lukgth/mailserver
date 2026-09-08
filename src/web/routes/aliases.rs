@@ -163,12 +163,46 @@ pub async fn create(
         form.source, form.destination
     );
 
+    // Shape/length validation before any lookups (rejects CR/LF and control chars).
+    let source = match crate::web::forms::validate_mail_address(&form.source, true) {
+        Ok(v) => v,
+        Err(e) => {
+            let tmpl = ErrorTemplate {
+                nav_active: "Aliases",
+                flash: None,
+                status_code: 400,
+                status_text: "Invalid Source Email",
+                title: "Invalid Source Email",
+                message: &e,
+                back_url: "/aliases/new",
+                back_label: "Back",
+            };
+            return Html(tmpl.render().unwrap()).into_response();
+        }
+    };
+    let destination = match crate::web::forms::validate_mail_address(&form.destination, false) {
+        Ok(v) => v,
+        Err(e) => {
+            let tmpl = ErrorTemplate {
+                nav_active: "Aliases",
+                flash: None,
+                status_code: 400,
+                status_text: "Invalid Destination",
+                title: "Invalid Destination",
+                message: &e,
+                back_url: "/aliases/new",
+                back_label: "Back",
+            };
+            return Html(tmpl.render().unwrap()).into_response();
+        }
+    };
+
     // Extract domain from source email
-    let source_parts: Vec<&str> = form.source.split('@').collect();
+    let source_parts: Vec<&str> = source.split('@').collect();
     if source_parts.len() != 2 {
         warn!(
             "[web] invalid source email format (no @ or multiple @): {}",
-            form.source
+            source
         );
         let tmpl = ErrorTemplate {
             nav_active: "Aliases",
@@ -178,7 +212,7 @@ pub async fn create(
             title: "Invalid Source Email",
             message: &format!(
                 "The source email '{}' is not in a valid format. It must be in the format 'user@domain.com' or '*@domain.com'.",
-                form.source
+                source
             ),
             back_url: "/aliases/new",
             back_label: "Back",
@@ -209,7 +243,7 @@ pub async fn create(
                 title: "Unregistered Domain",
                 message: &format!(
                     "The domain '{}' extracted from the source email '{}' is not registered. Please add the domain first in the Domains section.",
-                    source_domain, form.source
+                    source_domain, source
                 ),
                 back_url: "/aliases/new",
                 back_label: "Back",
@@ -221,7 +255,7 @@ pub async fn create(
     let domain_id = domain.id;
 
     // Validate that destination account exists
-    let destination_check = form.destination.clone();
+    let destination_check = destination.clone();
     let destination_exists = state
         .blocking_db(move |db| db.email_exists(&destination_check))
         .await;
@@ -229,7 +263,7 @@ pub async fn create(
     if !destination_exists {
         warn!(
             "[web] attempted to create alias to non-existent destination: {}",
-            form.destination
+            destination
         );
         let tmpl = ErrorTemplate {
             nav_active: "Aliases",
@@ -239,7 +273,7 @@ pub async fn create(
             title: "Invalid Destination",
             message: &format!(
                 "The destination email '{}' does not exist. Please create the account first in the Accounts section.",
-                form.destination
+                destination
             ),
             back_url: "/aliases/new",
             back_label: "Back",
@@ -247,22 +281,22 @@ pub async fn create(
         return Html(tmpl.render().unwrap()).into_response();
     }
 
-    let source = form.source.clone();
-    let destination = form.destination.clone();
+    let source_for_db = source.clone();
+    let destination_for_db = destination.clone();
     let create_result = state
-        .blocking_db(move |db| db.create_alias(domain_id, &source, &destination))
+        .blocking_db(move |db| db.create_alias(domain_id, &source_for_db, &destination_for_db))
         .await;
     match create_result {
         Ok(id) => {
             info!(
                 "[web] alias created successfully: {} -> {} (id={}, domain_id={})",
-                form.source, form.destination, id, domain_id
+                source, destination, id, domain_id
             );
             regen_configs(&state).await;
             fire_webhook(
                 &state,
                 "alias.created",
-                serde_json::json!({"source": form.source, "destination": form.destination}),
+                serde_json::json!({"source": source, "destination": destination}),
             );
             Redirect::to("/aliases").into_response()
         }
@@ -314,12 +348,42 @@ pub async fn update(
     Form(form): Form<AliasEditForm>,
 ) -> Response {
     let active = form.active.is_some();
+    let source = match crate::web::forms::validate_mail_address(&form.source, true) {
+        Ok(v) => v,
+        Err(e) => {
+            let tmpl = ErrorTemplate {
+                nav_active: "Aliases",
+                flash: None,
+                status_code: 400,
+                status_text: "Invalid Source Email",
+                title: "Invalid Source Email",
+                message: &e,
+                back_url: &format!("/aliases/{}/edit", id),
+                back_label: "Back",
+            };
+            return Html(tmpl.render().unwrap()).into_response();
+        }
+    };
+    let destination = match crate::web::forms::validate_mail_address(&form.destination, false) {
+        Ok(v) => v,
+        Err(e) => {
+            let tmpl = ErrorTemplate {
+                nav_active: "Aliases",
+                flash: None,
+                status_code: 400,
+                status_text: "Invalid Destination",
+                title: "Invalid Destination",
+                message: &e,
+                back_url: &format!("/aliases/{}/edit", id),
+                back_label: "Back",
+            };
+            return Html(tmpl.render().unwrap()).into_response();
+        }
+    };
     info!(
         "[web] POST /aliases/{} — updating alias source={}, destination={}, active={}",
-        id, form.source, form.destination, active
+        id, source, destination, active
     );
-    let source = form.source.clone();
-    let destination = form.destination.clone();
     state
         .blocking_db(move |db| db.update_alias(id, &source, &destination, active))
         .await;

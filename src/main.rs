@@ -9,6 +9,25 @@ mod web;
 use log::{debug, error, info, warn};
 use std::env;
 
+/// Return a log-safe form of a PostgreSQL connection URL — scheme, host and
+/// database name only, with credentials (and query params) stripped (M1).
+fn redact_db_url(url: &str) -> String {
+    let (scheme, rest) = match url.split_once("://") {
+        Some((s, r)) => (format!("{}://", s), r),
+        None => (String::new(), url),
+    };
+    let (authority, path) = match rest.find('/') {
+        Some(i) => (&rest[..i], &rest[i..]),
+        None => (rest, ""),
+    };
+    let host = authority
+        .rsplit_once('@')
+        .map(|(_, h)| h)
+        .unwrap_or(authority);
+    let db = path.split('?').next().unwrap_or(path);
+    format!("{}{}{}", scheme, host, db)
+}
+
 fn main() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
         .format_timestamp_millis()
@@ -38,8 +57,10 @@ fn main() {
             });
 
             info!(
-                "[main] serve: port={}, hostname={}, db_url={}",
-                port, hostname, db_url
+                "[main] serve: port={}, hostname={}, database={}",
+                port,
+                hostname,
+                redact_db_url(&db_url)
             );
 
             let database = db::Database::open(&db_url);
@@ -77,27 +98,46 @@ fn main() {
                 error!("[filter] DATABASE_URL not set; ensure it is provided via environment");
                 std::process::exit(75);
             });
+
+            // F2: never use Database::open on the filter path — it runs
+            // migrations and panics on outage. A DB outage must not stall
+            // the filter: resolve the base URLs best-effort and fall back to
+            // env-var defaults exactly like run_filter's fallback chain.
+            let db_settings = db::Database::try_open_with_options(
+                &db_url,
+                1,
+                std::time::Duration::from_millis(100),
+                std::time::Duration::from_millis(500),
+            );
             // Prefer pixel_base_url stored in the database (if set), fall back to env var, then default
-            let database = db::Database::open(&db_url);
-            let pixel_base_url = database
-                .get_setting("pixel_base_url")
-                .or_else(|| env::var("PIXEL_BASE_URL").ok())
-                .unwrap_or_else(|| {
-                    let h = env::var("HOSTNAME").unwrap_or_else(|_| "localhost".to_string());
-                    let p = env::var("ADMIN_PORT")
-                        .ok()
-                        .and_then(|v| v.parse::<u16>().ok())
-                        .unwrap_or(8080);
-                    let url = if p == 443 {
-                        format!("https://{}/pixel?id=", h)
-                    } else if p == 80 {
-                        format!("http://{}/pixel?id=", h)
-                    } else {
-                        format!("https://{}:{}/pixel?id=", h, p)
-                    };
-                    warn!("[filter] PIXEL_BASE_URL not set, defaulting to {}", url);
-                    url
-                });
+            let pixel_base_url = match &db_settings {
+                Ok(database) => database
+                    .get_setting("pixel_base_url")
+                    .or_else(|| env::var("PIXEL_BASE_URL").ok()),
+                Err(e) => {
+                    warn!(
+                        "[filter] failed to open database ({}), using env-var defaults for filter URLs",
+                        e
+                    );
+                    env::var("PIXEL_BASE_URL").ok()
+                }
+            }
+            .unwrap_or_else(|| {
+                let h = env::var("HOSTNAME").unwrap_or_else(|_| "localhost".to_string());
+                let p = env::var("ADMIN_PORT")
+                    .ok()
+                    .and_then(|v| v.parse::<u16>().ok())
+                    .unwrap_or(8080);
+                let url = if p == 443 {
+                    format!("https://{}/pixel?id=", h)
+                } else if p == 80 {
+                    format!("http://{}/pixel?id=", h)
+                } else {
+                    format!("https://{}:{}/pixel?id=", h, p)
+                };
+                warn!("[filter] PIXEL_BASE_URL not set, defaulting to {}", url);
+                url
+            });
 
             let mut sender = String::new();
             let mut recipients = Vec::new();
@@ -125,18 +165,21 @@ fn main() {
                 .ok()
                 .and_then(|p| p.parse::<u16>().ok())
                 .unwrap_or(8080);
-            let unsubscribe_base_url = database
-                .get_setting("unsubscribe_base_url")
-                .or_else(|| env::var("UNSUBSCRIBE_BASE_URL").ok())
-                .unwrap_or_else(|| {
-                    if admin_port == 443 {
-                        format!("https://{}", hostname)
-                    } else if admin_port == 80 {
-                        format!("http://{}", hostname)
-                    } else {
-                        format!("https://{}:{}", hostname, admin_port)
-                    }
-                });
+            let unsubscribe_base_url = match &db_settings {
+                Ok(database) => database
+                    .get_setting("unsubscribe_base_url")
+                    .or_else(|| env::var("UNSUBSCRIBE_BASE_URL").ok()),
+                Err(_) => env::var("UNSUBSCRIBE_BASE_URL").ok(),
+            }
+            .unwrap_or_else(|| {
+                if admin_port == 443 {
+                    format!("https://{}", hostname)
+                } else if admin_port == 80 {
+                    format!("http://{}", hostname)
+                } else {
+                    format!("https://{}:{}", hostname, admin_port)
+                }
+            });
 
             info!(
                 "[filter] running content filter sender={}, recipients={}",
@@ -211,7 +254,15 @@ fn main() {
                 error!("[reset-password] failed to hash password: {}", e);
                 std::process::exit(1);
             });
-            database.update_admin_password(admin.id, &hash);
+            // M4: update_admin_password returns Result — a failed write must not
+            // be reported as success.
+            if let Err(e) = database.update_admin_password(admin.id, &hash) {
+                error!(
+                    "[reset-password] failed to update password for admin user {}: {}",
+                    username, e
+                );
+                std::process::exit(1);
+            }
             info!("[reset-password] password updated for admin user: {}", username);
         }
         "genconfig" => {

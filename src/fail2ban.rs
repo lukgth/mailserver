@@ -12,6 +12,8 @@ const MAIL_LOG_PATH: &str = "/var/log/mail.log";
 const WEB_AUTH_LOG_PATH: &str = "/var/log/mail.log";
 const POLL_INTERVAL: Duration = Duration::from_secs(5);
 const ENABLED_CACHE_TTL: Duration = Duration::from_secs(30);
+/// Lightweight maintenance cadence for purging expired rows (audit/attempts).
+const PURGE_INTERVAL: Duration = Duration::from_secs(3600);
 
 /// A parsed authentication failure from a mail service log line.
 #[derive(Debug, Clone, PartialEq)]
@@ -178,10 +180,9 @@ fn handle_auth_failure(db: &Database, failure: &AuthFailure) {
         return;
     }
 
-    // Record the attempt
-    db.record_fail2ban_attempt(&failure.ip, &failure.service, &failure.detail);
-
-    // Get settings for this service
+    // Get settings for this service — G1: check the service is configured
+    // and enabled BEFORE recording the attempt, so disabled services never
+    // accumulate rows.
     let setting = match db.get_fail2ban_setting_by_service(&failure.service) {
         Some(s) => s,
         None => {
@@ -200,6 +201,11 @@ fn handle_auth_failure(db: &Database, failure: &AuthFailure) {
         );
         return;
     }
+
+    // Record the attempt — truncate attacker-controlled detail so oversized
+    // log lines cannot bloat the DB.
+    let detail: String = failure.detail.chars().take(256).collect();
+    db.record_fail2ban_attempt(&failure.ip, &failure.service, &detail);
 
     // Count recent attempts within the find_time window
     let recent_count =
@@ -283,6 +289,9 @@ fn tail_log_file(db: &Database) -> Result<(), std::io::Error> {
     // Cache the global enabled state to avoid querying the DB on every log line
     let mut enabled_cache = db.is_fail2ban_enabled();
     let mut cache_refreshed = Instant::now();
+    // Lightweight hourly maintenance: purge expired rows at most once/hour.
+    let mut last_purge = Instant::now();
+    let mut did_initial_purge = false;
 
     info!("[fail2ban] tailing {} from end of file", MAIL_LOG_PATH);
 
@@ -314,6 +323,14 @@ fn tail_log_file(db: &Database) -> Result<(), std::io::Error> {
                 if cache_refreshed.elapsed() >= ENABLED_CACHE_TTL {
                     enabled_cache = db.is_fail2ban_enabled();
                     cache_refreshed = Instant::now();
+                }
+                // G2: purge expired DB rows at most once per hour (run once
+                // shortly after startup, then hourly).
+                if !did_initial_purge || last_purge.elapsed() >= PURGE_INTERVAL {
+                    debug!("[fail2ban] purging expired rows");
+                    db.purge_expired_rows();
+                    last_purge = Instant::now();
+                    did_initial_purge = true;
                 }
                 std::thread::sleep(POLL_INTERVAL);
             }

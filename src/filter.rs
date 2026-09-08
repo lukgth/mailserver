@@ -1,12 +1,41 @@
 use log::{debug, error, info, warn};
-use std::io::{self, Read};
+use std::collections::HashMap;
 use std::fs;
-use std::sync::mpsc;
+use std::io::{self, Read};
+use std::sync::{LazyLock, Mutex};
+use std::time::{Duration, Instant};
 
 use crate::db::Database;
 
 /// Postfix EX_TEMPFAIL exit code — tells Postfix to queue the message for retry.
 const EX_TEMPFAIL: i32 = 75;
+
+/// In-memory first-seen registry of Message-IDs used to dedupe rate-limit
+/// counting across Postfix retries of the same message. A retried message
+/// must count only once in the DB rate-limit window; entries expire after
+/// 24h and the registry resets when the filter process restarts (F9).
+static RATE_LIMIT_SEEN: LazyLock<Mutex<HashMap<String, Instant>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+const RATE_LIMIT_DEDUPE_TTL: Duration = Duration::from_secs(24 * 60 * 60);
+
+/// Return `true` if `message_id` was already seen within the TTL, recording
+/// it as seen on first contact. Empty IDs are never tracked (no dedupe).
+fn rate_limit_message_seen(message_id: &str) -> bool {
+    if message_id.is_empty() {
+        return false;
+    }
+    let mut seen = match RATE_LIMIT_SEEN.lock() {
+        Ok(map) => map,
+        Err(_) => return false, // poisoned — fall back to counting every attempt
+    };
+    let now = Instant::now();
+    seen.retain(|_, first| now.duration_since(*first) < RATE_LIMIT_DEDUPE_TTL);
+    if seen.contains_key(message_id) {
+        return true;
+    }
+    seen.insert(message_id.to_string(), now);
+    false
+}
 
 pub fn run_filter(
     db_url: &str,
@@ -24,17 +53,24 @@ pub fn run_filter(
 
     let mut target_recipients = recipients.to_vec();
 
-    // 1. Read entire email from stdin
+    // 1. Read entire email from stdin as raw bytes. Never decode with
+    //    read_to_string: invalid UTF-8 would fail the whole read, and the
+    //    bytes must be preserved for reinjection.
     debug!("[filter] reading email from stdin");
-    let mut email_data = String::new();
-    if let Err(e) = io::stdin().read_to_string(&mut email_data) {
+    let mut email_bytes = Vec::new();
+    if let Err(e) = io::stdin().read_to_end(&mut email_bytes) {
+        // F1: any read failure is fatal — exit EX_TEMPFAIL so Postfix
+        // queues the message for retry instead of silently dropping it.
         error!("[filter] failed to read email from stdin: {}", e);
-        return;
+        std::process::exit(EX_TEMPFAIL);
     }
     info!(
         "[filter] read email from stdin ({} bytes)",
-        email_data.len()
+        email_bytes.len()
     );
+    // Processing APIs take &str; decode lossily for analysis while the
+    // original bytes are preserved for reinjection (F1).
+    let email_data = String::from_utf8_lossy(&email_bytes).into_owned();
 
     // Extract headers early for use in webhook payload
     let subject = extract_header(&email_data, "Subject").unwrap_or_default();
@@ -43,7 +79,7 @@ pub fn run_filter(
     let cc_header = extract_header(&email_data, "Cc").unwrap_or_default();
     let date_header = extract_header(&email_data, "Date").unwrap_or_default();
     let message_id_header = extract_header(&email_data, "Message-ID").unwrap_or_default();
-    let size_bytes = email_data.len();
+    let size_bytes = email_bytes.len();
 
     // 2. Check if the content filter feature is enabled
     let mut modified = email_data.clone();
@@ -75,7 +111,18 @@ pub fn run_filter(
                 // Check rate-limit rules before doing anything else.
                 // Uses the same condition evaluation as tracking and footer rules.
                 let primary_recipient = recipients.first().map(|s| s.as_str()).unwrap_or("");
-                if let Some(rule_name) = db.check_rate_limit(sender, primary_recipient, &subject, size_bytes) {
+                // F9: Postfix retries a TEMPFAILed message with the same
+                // Message-ID. Count each message once in the DB window — a
+                // retry must not re-increment (that would inflate the count
+                // and block unrelated mail from the same sender).
+                if rate_limit_message_seen(&message_id_header) {
+                    warn!(
+                        "[filter] rate limit: message {} already counted in dedupe window, skipping DB increment",
+                        message_id_header
+                    );
+                } else if let Some(rule_name) =
+                    db.check_rate_limit(sender, primary_recipient, &subject, size_bytes)
+                {
                     warn!(
                         "[filter] rate limit exceeded for sender={} (rule='{}'): returning EX_TEMPFAIL",
                         sender, rule_name
@@ -169,38 +216,56 @@ pub fn run_filter(
                         message_id
                     );
 
-                    // Try to inject before </body>
-                    if let Some(pos) = modified.to_lowercase().rfind("</body>") {
-                        modified.insert_str(pos, &pixel_tag);
-                        info!(
-                            "[filter] injected tracking pixel before </body> for message_id={}",
-                            message_id
+                    // Inject the pixel before </body> only — never append content
+                    // outside the MIME body (F5). `to_ascii_lowercase` is
+                    // byte-preserving, so the found offset is valid in
+                    // `modified` (F4: `to_lowercase` can shift offsets).
+                    let pixel_injected = match modified.to_ascii_lowercase().rfind("</body>") {
+                        Some(pos) if !body_is_encoded(&modified, pos) => {
+                            modified.insert_str(pos, &pixel_tag);
+                            info!(
+                                "[filter] injected tracking pixel before </body> for message_id={}",
+                                message_id
+                            );
+                            true
+                        }
+                        Some(_) => {
+                            // F5: splicing raw HTML into a quoted-printable/
+                            // base64 part corrupts the encoded payload.
+                            debug!(
+                                "[filter] skipping pixel injection for message_id={}: body part is quoted-printable/base64 encoded",
+                                message_id
+                            );
+                            false
+                        }
+                        None => {
+                            debug!(
+                                "[filter] email has no </body> — skipping pixel injection for message_id={}",
+                                message_id
+                            );
+                            false
+                        }
+                    };
+
+                    // F6: only record the tracked message when a pixel was
+                    // actually injected — no phantom tracking rows.
+                    if pixel_injected {
+                        let recipient = recipients.first().map(|s| s.as_str()).unwrap_or("");
+                        debug!(
+                            "[filter] recording tracked message: message_id={}, subject={}",
+                            message_id, subject
                         );
-                    } else if modified.contains("<html") || modified.contains("<HTML") {
-                        // Append to end if HTML but no </body>
-                        modified.push_str(&pixel_tag);
+                        db.create_tracked_message(&message_id, sender, recipient, &subject, None);
                         info!(
-                            "[filter] appended tracking pixel to HTML email for message_id={}",
+                            "[filter] tracked message recorded: message_id={}",
                             message_id
                         );
                     } else {
                         debug!(
-                            "[filter] email is not HTML — skipping pixel injection for message_id={}",
+                            "[filter] pixel not injected — skipping tracked_message recording for message_id={}",
                             message_id
                         );
                     }
-
-                    // Record tracked message
-                    let recipient = recipients.first().map(|s| s.as_str()).unwrap_or("");
-                    debug!(
-                        "[filter] recording tracked message: message_id={}, subject={}",
-                        message_id, subject
-                    );
-                    db.create_tracked_message(&message_id, sender, recipient, &subject, None);
-                    info!(
-                        "[filter] tracked message recorded: message_id={}",
-                        message_id
-                    );
                 } else {
                     debug!("[filter] no tracking — passing email through unmodified");
                 }
@@ -272,53 +337,54 @@ pub fn run_filter(
         },
     };
 
-    // 7. If the email was suppressed because the recipient has unsubscribed, drop
-    //    the message here (do not reinject) without an error so Postfix discards it.
-    //    Fire the webhook so the event is still visible to the caller.
-    if suppressed {
-        info!("[filter] email suppressed — not reinjecting (see earlier log for recipient/domain)");
-        send_webhook(
-            &webhook_url,
-            db_url,
-            &meta,
-            email_was_modified,
-            sender,
-            &subject,
-        );
-        return;
-    }
-
-    // 8. Reinject via SMTP to 127.0.0.1:10025
-    info!("[filter] reinjecting email via SMTP to 127.0.0.1:10025");
-
-    // Spawn the webhook thread early so it can start in parallel with the reinject.
-    // A channel carries the final `modified` flag (None = don't fire, Some(bool) = fire).
-    let (modified_tx, modified_rx) = mpsc::channel::<Option<bool>>();
-    let webhook_handle = {
+    // 7. Fire the webhook on a detached thread so filter exit is independent
+    //    of the HTTP call (F12). Outcome logging happens inside the thread;
+    //    a process exit racing an in-flight request is acceptable
+    //    (delivery-first). Spawned for both suppressed and reinjected paths
+    //    so the event is always visible to the caller.
+    {
         let url = webhook_url.clone();
         let db_url_owned = db_url.to_string();
         let sender_owned = sender.to_string();
         let subject_owned = subject.clone();
+        let meta_owned = meta.clone();
+        let was_modified = email_was_modified;
         std::thread::spawn(move || {
-            // Wait for the reinject outcome before making the HTTP call.
-            match modified_rx.recv() {
-                Ok(Some(was_modified)) => {
-                    send_webhook(
-                        &url,
-                        &db_url_owned,
-                        &meta,
-                        was_modified,
-                        &sender_owned,
-                        &subject_owned,
-                    );
-                }
-                // None or channel closed means double-failure — skip webhook.
-                _ => {}
-            }
-        })
-    };
+            send_webhook(
+                &url,
+                &db_url_owned,
+                &meta_owned,
+                was_modified,
+                &sender_owned,
+                &subject_owned,
+            );
+        });
+    }
+
+    // 8. If the email was suppressed because the recipient has unsubscribed, drop
+    //    the message here (do not reinject) without an error so Postfix discards it.
+    if suppressed {
+        info!("[filter] email suppressed — not reinjecting (see earlier log for recipient/domain)");
+        return;
+    }
+
+    // 9. Reinject via SMTP to 127.0.0.1:10025
+    info!("[filter] reinjecting email via SMTP to 127.0.0.1:10025");
 
     if let Err(e) = reinject_smtp(&modified, sender, &target_recipients) {
+        // F7: a timeout means the reinject listener is wedged — don't waste
+        // time on the unmodified fallback into the same wall; Postfix will
+        // retry the message later.
+        if matches!(
+            e.kind(),
+            io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock
+        ) {
+            error!(
+                "[filter] reinject timed out ({}); exiting EX_TEMPFAIL for Postfix retry",
+                e
+            );
+            std::process::exit(EX_TEMPFAIL);
+        }
         warn!(
             "[filter] failed to reinject modified email: {}. attempting unmodified fallback",
             e
@@ -328,24 +394,13 @@ pub fn run_filter(
                 "[filter] failed to reinject unmodified fallback email: {}",
                 e
             );
-            // Signal the webhook thread to not fire (both injects failed).
-            let _ = modified_tx.send(None);
-            let _ = webhook_handle.join();
             // Tell Postfix to retry delivery rather than silently dropping the message.
             std::process::exit(EX_TEMPFAIL);
         }
         info!("[filter] unmodified fallback email reinjected successfully");
-        // Fallback succeeded: the email sent is the original (unmodified).
-        let _ = modified_tx.send(Some(false));
-        let _ = webhook_handle.join();
         return;
     }
     info!("[filter] email reinjected successfully");
-
-    // Signal webhook thread with the actual modified flag; it will fire the HTTP call.
-    let _ = modified_tx.send(Some(email_was_modified));
-    // Wait for the webhook thread to complete before the process exits.
-    let _ = webhook_handle.join();
 }
 
 fn inject_headers(email: &str, headers: &str) -> String {
@@ -368,26 +423,62 @@ fn inject_headers(email: &str, headers: &str) -> String {
     }
 }
 
+/// Return `true` if a `Content-Transfer-Encoding` header belonging to the
+/// body region (any such header line starting before byte offset `up_to`)
+/// declares quoted-printable or base64. Splicing raw HTML or plain text
+/// into such a part corrupts the encoded payload, so injection must be
+/// skipped (F5).
+fn body_is_encoded(email: &str, up_to: usize) -> bool {
+    let mut encoded = false;
+    let mut pos = 0usize;
+    for raw in email.split_inclusive('\n') {
+        if pos >= up_to {
+            break;
+        }
+        let line = raw.trim_end_matches(['\r', '\n']);
+        if line.to_ascii_lowercase().starts_with("content-transfer-encoding:") {
+            let value = line
+                .split_once(':')
+                .map(|(_, v)| v.trim().to_ascii_lowercase())
+                .unwrap_or_default();
+            encoded = value == "quoted-printable" || value == "base64";
+        }
+        pos += raw.len();
+    }
+    encoded
+}
+
 fn inject_footer(email: &str, footer_html: &str) -> String {
     if footer_html.trim().is_empty() {
         return email.to_string();
     }
     let mut output = email.to_string();
+    // `to_ascii_lowercase` is byte-preserving, so offsets match `output`.
     let lower = output.to_ascii_lowercase();
     let footer_block = format!(
         r#"<div class="domain-footer" style="margin-top:24px;border-top:1px solid #e2e8f0;padding-top:12px;font-size:0.9em;color:#475569;line-height:1.4;">{}</div>"#,
         footer_html
     );
     if let Some(pos) = lower.rfind("</body>") {
+        if body_is_encoded(&output, pos) {
+            // F5: never splice raw HTML into a quoted-printable/base64 part.
+            debug!(
+                "[filter] skipping footer injection: body part is quoted-printable/base64 encoded"
+            );
+            return output;
+        }
         output.insert_str(pos, &footer_block);
         return output;
     }
     if lower.contains("<html") {
-        output.push_str(&footer_block);
+        // F5: HTML without </body> — never append content outside the final
+        // MIME boundary.
+        debug!("[filter] skipping footer injection: HTML email without </body>");
         return output;
     }
     let plain = strip_html_tags(footer_html);
-    if plain.is_empty() {
+    if plain.is_empty() || body_is_encoded(&output, output.len()) {
+        debug!("[filter] skipping plain-text footer: no text or body part is encoded");
         return output;
     }
     output.push_str("\n\n-- \n");
@@ -473,7 +564,7 @@ fn is_safe_smtp_addr(s: &str) -> bool {
 
 fn reinject_smtp(email: &str, sender: &str, recipients: &[String]) -> io::Result<()> {
     use std::io::{BufReader, Write};
-    use std::net::TcpStream;
+    use std::net::{TcpStream, ToSocketAddrs};
 
     // Guard the envelope before opening the SMTP session.  An attacker who
     // controls the `sender` or any `rcpt` could otherwise inject CRLF
@@ -510,7 +601,21 @@ fn reinject_smtp(email: &str, sender: &str, recipients: &[String]) -> io::Result
     }
 
     debug!("[filter] connecting to 127.0.0.1:10025 for reinjection");
-    let stream = TcpStream::connect("127.0.0.1:10025")?;
+    // F7: bound every phase of the SMTP conversation — a wedged listener
+    // must surface as a timeout (→ EX_TEMPFAIL), not an infinite hang.
+    let timeout = std::time::Duration::from_secs(10);
+    let addr = ("127.0.0.1", 10025u16)
+        .to_socket_addrs()?
+        .next()
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::AddrNotAvailable,
+                "cannot resolve reinject address 127.0.0.1:10025",
+            )
+        })?;
+    let stream = TcpStream::connect_timeout(&addr, timeout)?;
+    stream.set_read_timeout(Some(timeout))?;
+    stream.set_write_timeout(Some(timeout))?;
     // Clone the stream so we can have a buffered reader and a writer on the same socket.
     let mut writer = stream.try_clone()?;
     let mut reader = BufReader::new(stream);
@@ -527,12 +632,44 @@ fn reinject_smtp(email: &str, sender: &str, recipients: &[String]) -> io::Result
     debug!("[filter] EHLO response: {}", resp.trim());
     smtp_expect(&resp, "250")?;
 
-    // MAIL FROM
+    // MAIL FROM — with extended parameters when the message needs them:
+    //   BODY=8BITMIME (RFC 6152) when the message contains non-ASCII bytes,
+    //   SMTPUTF8 (RFC 6531) additionally when non-ASCII appears in the
+    //   header section (UTF-8 header values). If the listener rejects the
+    //   params (5xx), retry the envelope without them (F8).
+    let has_non_ascii = !email.is_ascii();
+    let header_section = email
+        .find("\r\n\r\n")
+        .or_else(|| email.find("\n\n"))
+        .map(|pos| &email[..pos])
+        .unwrap_or(email);
+    let params = if has_non_ascii {
+        if !header_section.is_ascii() {
+            " BODY=8BITMIME SMTPUTF8"
+        } else {
+            " BODY=8BITMIME"
+        }
+    } else {
+        ""
+    };
+
     debug!("[filter] sending MAIL FROM:<{}>", sender);
-    writer.write_all(format!("MAIL FROM:<{}>\r\n", sender).as_bytes())?;
+    writer.write_all(format!("MAIL FROM:<{}>{}\r\n", sender, params).as_bytes())?;
     let resp = read_smtp_response(&mut reader)?;
-    debug!("[filter] MAIL FROM response: {}", resp.trim());
-    smtp_expect(&resp, "250")?;
+    if !params.is_empty() && resp.trim_start().starts_with('5') {
+        warn!(
+            "[filter] listener rejected MAIL FROM params '{}' ({}); retrying without params",
+            params.trim(),
+            resp.trim()
+        );
+        writer.write_all(format!("MAIL FROM:<{}>\r\n", sender).as_bytes())?;
+        let resp = read_smtp_response(&mut reader)?;
+        debug!("[filter] MAIL FROM (no params) response: {}", resp.trim());
+        smtp_expect(&resp, "250")?;
+    } else {
+        debug!("[filter] MAIL FROM response: {}", resp.trim());
+        smtp_expect(&resp, "250")?;
+    }
 
     // RCPT TO for each recipient
     for rcpt in recipients {
@@ -617,6 +754,7 @@ fn smtp_expect(response: &str, expected_code: &str) -> io::Result<()> {
     }
 }
 
+#[derive(Clone)]
 struct EmailMetadata {
     sender: String,
     recipients: Vec<String>,
@@ -656,70 +794,77 @@ fn send_webhook(
     });
     let request_body = payload.to_string();
 
-    let (response_status, response_body, error, duration_ms) = if webhook_url.is_empty() {
-        (None, String::new(), String::new(), 0i64)
-    } else {
-        debug!("[filter] sending webhook to {}", webhook_url);
-        let start = std::time::Instant::now();
+    // F11: never send to an unconfigured or SSRF-unsafe target. Skip + log
+    // when the URL fails outbound validation (https-only, resolvable host,
+    // no loopback/private/ULA addresses, redirects re-validated).
+    if webhook_url.is_empty() {
+        return; // webhook not configured
+    }
+    if !crate::web::validate_outbound_url(webhook_url) {
+        warn!(
+            "[filter] skipping webhook: URL failed outbound validation ({})",
+            webhook_url
+        );
+        return;
+    }
 
-        let (response_status, response_body, error) = match reqwest::blocking::Client::builder()
-            .timeout(std::time::Duration::from_secs(10))
-            .build()
-        {
-            Ok(client) => match client.post(webhook_url).json(&payload).send() {
-                Ok(resp) => {
-                    let status = resp.status().as_u16() as i32;
-                    let body = resp.text().unwrap_or_default();
-                    // Truncate response body to 2 KB for storage (char-boundary safe)
-                    let body_truncated = if body.len() > 2048 {
-                        let mut end = 2048;
-                        while !body.is_char_boundary(end) {
-                            end -= 1;
-                        }
-                        body[..end].to_string()
-                    } else {
-                        body
-                    };
-                    info!(
-                        "[filter] webhook delivered to {} status={}",
-                        webhook_url, status
-                    );
-                    (Some(status), body_truncated, String::new())
-                }
-                Err(e) => {
-                    warn!("[filter] webhook delivery failed to {}: {}", webhook_url, e);
-                    (None, String::new(), e.to_string())
-                }
-            },
+    debug!("[filter] sending webhook to {}", webhook_url);
+    let start = std::time::Instant::now();
+
+    let (response_status, response_body, error) = match reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+    {
+        Ok(client) => match client.post(webhook_url).json(&payload).send() {
+            Ok(resp) => {
+                let status = resp.status().as_u16() as i32;
+                let body = resp.text().unwrap_or_default();
+                // Truncate response body to 2 KB for storage (char-boundary safe)
+                let body_truncated = if body.len() > 2048 {
+                    let mut end = 2048;
+                    while !body.is_char_boundary(end) {
+                        end -= 1;
+                    }
+                    body[..end].to_string()
+                } else {
+                    body
+                };
+                info!(
+                    "[filter] webhook delivered to {} status={}",
+                    webhook_url, status
+                );
+                (Some(status), body_truncated, String::new())
+            }
             Err(e) => {
-                warn!("[filter] failed to build HTTP client for webhook: {}", e);
+                warn!("[filter] webhook delivery failed to {}: {}", webhook_url, e);
                 (None, String::new(), e.to_string())
             }
-        };
-
-        let duration_ms = start.elapsed().as_millis() as i64;
-        (response_status, response_body, error, duration_ms)
+        },
+        Err(e) => {
+            warn!("[filter] failed to build HTTP client for webhook: {}", e);
+            (None, String::new(), e.to_string())
+        }
     };
 
+    let duration_ms = start.elapsed().as_millis() as i64;
+
     // Log to the database when a webhook was actually dispatched (best-effort).
-    if !webhook_url.is_empty() {
-        if let Ok(db) = Database::try_open_with_options(
-            db_url,
-            1,
-            std::time::Duration::from_millis(100),
-            std::time::Duration::from_millis(500),
-        ) {
-            db.log_webhook(
-                webhook_url,
-                &request_body,
-                response_status,
-                &response_body,
-                &error,
-                duration_ms,
-                sender,
-                subject,
-            );
-        }
+    if let Ok(db) = Database::try_open_with_options(
+        db_url,
+        1,
+        std::time::Duration::from_millis(100),
+        std::time::Duration::from_millis(500),
+    ) {
+        db.log_webhook(
+            webhook_url,
+            &request_body,
+            response_status,
+            &response_body,
+            &error,
+            duration_ms,
+            sender,
+            subject,
+        );
     }
 }
 
@@ -903,14 +1048,27 @@ fn move_recipient_to_junk(recipient: &str, mail_root: &str) -> Option<String> {
         }
     }
 
-    if let Err(e) = std::process::Command::new("chown")
+    match std::process::Command::new("chown")
         .arg("-R")
         .arg("vmail:vmail")
         .arg(&maildir_base)
         .status()
     {
-        warn!("[filter] failed to chown maildir {}: {}", maildir_base, e);
-        return None;
+        // F10: a nonzero chown exit (not just a spawn error) means the Junk
+        // folder is not owned by vmail — delivering there would fail. Fall
+        // back to inbox delivery.
+        Ok(status) if status.success() => {}
+        Ok(status) => {
+            warn!(
+                "[filter] chown maildir {} exited with status {}; falling back to inbox delivery",
+                maildir_base, status
+            );
+            return None;
+        }
+        Err(e) => {
+            warn!("[filter] failed to chown maildir {}: {}", maildir_base, e);
+            return None;
+        }
     }
 
     Some(format!("{}+Junk@{}", base_local, domain))
@@ -1249,9 +1407,31 @@ mod tests {
     fn move_recipient_to_junk_creates_directories_and_rewrites_address() {
         let temp = std::env::temp_dir().join(format!("maildir_test_{}", uuid::Uuid::new_v4()));
         let root = temp.to_string_lossy().to_string();
-        let result = move_recipient_to_junk("alice@example.com", &root).unwrap();
-        assert_eq!(result, "alice+Junk@example.com");
 
+        // F10: whether the result is Some depends on the environment being
+        // able to `chown` to vmail:vmail (needs the user/root). Probe it so
+        // the assertion is deterministic in any CI sandbox: on failure the
+        // filter deliberately falls back to inbox delivery (None).
+        let can_chown = std::process::Command::new("chown")
+            .arg("-R")
+            .arg("vmail:vmail")
+            .arg(&root)
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+
+        let result = move_recipient_to_junk("alice@example.com", &root);
+        if can_chown {
+            assert_eq!(result.as_deref(), Some("alice+Junk@example.com"));
+        } else {
+            assert_eq!(
+                result, None,
+                "chown to vmail:vmail is impossible here — must fall back to inbox delivery"
+            );
+        }
+
+        // Directory scaffolding is created before the chown, so it exists
+        // either way.
         let junk_new = temp
             .join("example.com")
             .join("alice")

@@ -212,13 +212,44 @@ pub fn maildir_path(domain: &str, username: &str) -> String {
     format!("/data/mail/{}/{}/Maildir", domain, username)
 }
 
+/// JMAP-3: validate a client-supplied mailbox id before it is used to build
+/// any path. `mailbox:inbox` is always valid; other ids must name a plain,
+/// safe maildir subfolder per `webmail::is_safe_folder` semantics (no path
+/// separators, no `.`/`..` traversal, no `..`-prefixed names).
+pub fn is_valid_mailbox_id(mailbox_id: &str) -> bool {
+    if mailbox_id == "mailbox:inbox" {
+        return true;
+    }
+    let Some(name) = mailbox_id.strip_prefix("mailbox:") else {
+        return false;
+    };
+    if name.is_empty()
+        || name.contains('/')
+        || name.contains('\\')
+        || name == ".."
+        || name.starts_with("..")
+    {
+        return false;
+    }
+    // The path component formatted below is ".{name}"; it must itself be a
+    // safe maildir folder name.
+    let component = format!(".{}", name);
+    component != ".." && crate::web::routes::webmail::is_safe_folder(&component)
+}
+
 pub fn mailbox_dir(maildir_base: &str, mailbox_id: &str) -> String {
     if mailbox_id == "mailbox:inbox" {
-        maildir_base.to_string()
-    } else if let Some(name) = mailbox_id.strip_prefix("mailbox:") {
-        format!("{}/.{}", maildir_base, name)
-    } else {
-        maildir_base.to_string()
+        return maildir_base.to_string();
+    }
+    // Defense in depth: never format an unvalidated folder name into a path.
+    // Invalid ids fall back to INBOX rather than ever constructing a
+    // traversal-capable path.
+    if !is_valid_mailbox_id(mailbox_id) {
+        return maildir_base.to_string();
+    }
+    match mailbox_id.strip_prefix("mailbox:") {
+        Some(name) => format!("{}/.{}", maildir_base, name),
+        None => maildir_base.to_string(),
     }
 }
 

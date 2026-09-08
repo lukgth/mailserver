@@ -36,28 +36,43 @@ pub async fn auth_login(
     Json(req): Json<AuthLoginRequest>,
 ) -> Response {
     let email_lower = req.email.trim().to_lowercase();
-    let email_lower_clone = email_lower.clone();
 
+    // DAV-2: reject attempts while the account is inside its failure-lockout
+    // window, before any further work.
+    if crate::web::routes::webdav::dav_auth::is_locked(&email_lower) {
+        warn!("[jmap] login locked out for {}", email_lower);
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(serde_json::json!({
+                "type": "urn:ietf:params:jmap:error:rateLimit",
+                "detail": "Too many failed login attempts"
+            })),
+        )
+            .into_response();
+    }
+
+    let email_lower_clone = email_lower.clone();
     let account = state
         .blocking_db(move |db| db.get_jmap_account_by_email(&email_lower_clone))
         .await;
 
-    let account = match account {
-        Some(a) if a.active => a,
-        _ => {
-            warn!("[jmap] auth failed for {}", email_lower);
-            return (
-                StatusCode::UNAUTHORIZED,
-                Json(serde_json::json!({
-                    "type": "urn:ietf:params:jmap:error:unauthorized",
-                    "detail": "Invalid email or password"
-                })),
-            )
-                .into_response();
-        }
+    // Unknown user, inactive account and wrong password all share one constant
+    // error body, so the endpoint cannot be used to enumerate accounts.
+    let Some(account) = account.filter(|a| a.active) else {
+        crate::web::routes::webdav::dav_auth::record_failure(&email_lower);
+        warn!("[jmap] auth failed for {}", email_lower);
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({
+                "type": "urn:ietf:params:jmap:error:unauthorized",
+                "detail": "Invalid email or password"
+            })),
+        )
+            .into_response();
     };
 
     if !crate::auth::verify_password(&req.password, &account.password_hash) {
+        crate::web::routes::webdav::dav_auth::record_failure(&email_lower);
         warn!("[jmap] bad password for {}", email_lower);
         return (
             StatusCode::UNAUTHORIZED,
@@ -68,6 +83,9 @@ pub async fn auth_login(
         )
             .into_response();
     }
+
+    // Success — clear any earlier failure marks for this account.
+    crate::web::routes::webdav::dav_auth::clear(&email_lower);
 
     // Generate token
     let token = uuid::Uuid::new_v4().to_string();
@@ -168,22 +186,51 @@ pub async fn download_blob(
             .into_response();
     }
 
-    // blob_id is the email filename — find it in any mailbox
-    let mdir = super::maildir_path(
+    // JMAP-1: blob_id is an email filename and must be a plain, safe path
+    // component — reject traversal before any path is constructed.
+    if !crate::web::routes::webmail::is_safe_path_component(&blob_id) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "type": "urn:ietf:params:jmap:error:invalidArguments",
+                "detail": "Invalid blob id"
+            })),
+        )
+            .into_response();
+    }
+
+    let maildir_base = super::maildir_path(
         auth.account.domain_name.as_deref().unwrap_or(""),
         &auth.account.username,
     );
 
+    // Defense in depth: only serve files whose canonicalized path resolves
+    // inside the account's maildir root (also blocks symlink escapes).
+    let canon_base =
+        std::fs::canonicalize(&maildir_base).unwrap_or_else(|_| std::path::PathBuf::from(&maildir_base));
+    let base_prefix = format!("{}/", canon_base.display());
+
     // Search through all maildir folders for this filename
-    let folders = super::scan_maildir_folders(&mdir);
+    let folders = super::scan_maildir_folders(&maildir_base);
     let mut file_path = None;
 
     for (dir_name, _) in &folders {
-        let base = super::mailbox_dir(&mdir, &super::mailbox_id_from_dir(dir_name));
+        let base = super::mailbox_dir(&maildir_base, &super::mailbox_id_from_dir(dir_name));
         for sub in &["cur", "new"] {
             let path = format!("{}/{}/{}", base, sub, blob_id);
-            if std::path::Path::new(&path).exists() {
-                file_path = Some(path);
+            if !std::path::Path::new(&path).exists() {
+                continue;
+            }
+            match std::fs::canonicalize(&path) {
+                Ok(canon) => {
+                    let canon_str = canon.to_string_lossy().to_string();
+                    if canon_str == canon_base || canon_str.starts_with(&base_prefix) {
+                        file_path = Some(canon_str);
+                    }
+                }
+                Err(e) => warn!("[jmap] blob canonicalize error: {}", e),
+            }
+            if file_path.is_some() {
                 break;
             }
         }

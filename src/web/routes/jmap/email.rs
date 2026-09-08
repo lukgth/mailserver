@@ -69,6 +69,13 @@ pub async fn email_get(
             }
         };
 
+        // JMAP-2: the filename inside an email id must be a safe path
+        // component — never fs::read a path built from unvalidated input.
+        if !crate::web::routes::webmail::is_safe_path_component(&filename) {
+            not_found.push(id.clone());
+            continue;
+        }
+
         // Find the file in any mailbox
         let file_data = find_email_file(&mdir, &filename);
         match file_data {
@@ -464,6 +471,19 @@ pub async fn email_query(
         .and_then(|v| v.as_str())
         .map(|s| s.to_string())
         .unwrap_or_else(|| "mailbox:inbox".to_string());
+
+    // JMAP-3: the mailbox id inside the filter must resolve to a safe
+    // maildir folder name — reject traversal before any path construction.
+    if !super::is_valid_mailbox_id(&target_mailbox) {
+        return super::DispatchResult {
+            name: "Email/query".to_string(),
+            args: serde_json::to_value(super::JmapError {
+                type_: "urn:ietf:params:jmap:error:invalidArguments".to_string(),
+                description: Some("Invalid inMailbox filter".to_string()),
+            })
+            .unwrap(),
+        };
+    }
 
     let mb_dir = mailbox_dir(&mdir, &target_mailbox);
     let files = list_maildir_files(&mb_dir);

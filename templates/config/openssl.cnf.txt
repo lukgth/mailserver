@@ -12,6 +12,4 @@ CN = {{ hostname }}
 subjectAltName = @alt_names
 
 [alt_names]
-DNS.1 = {{ hostname }}
-DNS.2 = localhost
-IP.1 = 127.0.0.1
+{{ san_entries }}

@@ -10,6 +10,12 @@ ssl = yes
 ssl_server_cert_file = /data/ssl/cert.pem
 ssl_server_key_file = /data/ssl/key.pem
 
+# Refuse AUTH until the connection is encrypted. With disable_plaintext_auth=yes
+# Dovecot rejects AUTH on the plaintext 143/110 listeners unless the client first
+# upgrades via STARTTLS; the 993/995 listeners carry ssl=yes and accept AUTH
+# directly. Roundcube connects with tls:// on 143 (STARTTLS) so it is unaffected.
+disable_plaintext_auth = yes
+
 # TLS configuration for broader client compatibility (ESP8266, ESP32, embedded clients)
 # Support TLS 1.2+ for embedded and modern clients (TLS 1.0/1.1 are deprecated)
 ssl_min_protocol = TLSv1.2
@@ -41,7 +47,8 @@ auth_username_format = %u
 
 # Enable SASL authentication mechanisms for compatibility with various clients
 # PLAIN and LOGIN are safe here because:
-# - Dovecot has ssl=yes (line 11) with TLS 1.2+ enforced
+# - disable_plaintext_auth=yes: AUTH is refused until the connection is encrypted
+#   (STARTTLS on 143/110, ssl=yes directly on 993/995), with TLS 1.2+ enforced
 # - Postfix submission port (587) requires encryption (smtpd_tls_security_level=encrypt)
 # - Postfix smtps port (465) uses TLS wrapper mode
 auth_mechanisms = plain login

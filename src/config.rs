@@ -505,7 +505,10 @@ milter_default_action = accept"#
         r#"transport_maps = texthash:/etc/postfix/transport_maps
 smtp_sasl_auth_enable = yes
 smtp_sasl_password_maps = texthash:/etc/postfix/sasl_passwd
-smtp_sasl_security_options = noanonymous
+# Refuse anonymous auth and PLAIN/LOGIN-like mechanisms over cleartext
+# connections: outbound SASL credentials are only sent after opportunistic
+# TLS (smtp_tls_security_level = may) has been negotiated.
+smtp_sasl_security_options = noanonymous, noplaintext
 smtp_sasl_tls_security_options = noanonymous"#
             .to_string()
     } else if has_assignments {
@@ -589,10 +592,16 @@ pub fn generate_virtual_mailboxes(db: &Database) {
             continue;
         }
         if let Some(domain) = &a.domain_name {
+            let Some(username) = sanitize_map_token(&a.username, true) else {
+                continue;
+            };
+            let Some(domain) = sanitize_map_token(domain, false) else {
+                continue;
+            };
             let _ = writeln!(
                 lines,
                 "{}@{} {}/{}/Maildir/",
-                a.username, domain, domain, a.username
+                username, domain, domain, username
             );
         }
     }
@@ -643,17 +652,20 @@ fn build_virtual_alias_entries(
     // alias destinations as loops in virtual-mailbox domains).
     for f in forwardings {
         if f.active {
-            if f.keep_copy && !f.source.starts_with('@') {
+            // Normalize forwarding sources exactly like alias sources so that
+            // '*@domain' patterns are treated as catch-alls ('@domain') here too.
+            let source = normalize_virtual_alias_source(&f.source, f.domain_name.as_deref());
+            if f.keep_copy && !source.starts_with('@') {
                 // Skip: local delivery uses virtual_mailbox_maps; the external copy is
                 // handled by recipient_bcc_maps.  Omitting from specific_sources lets
                 // the accounts loop add an identity entry for catch-all protection.
                 continue;
             }
-            if f.source.starts_with('@') {
-                catch_all_entries.push((f.source.clone(), f.destination.clone()));
+            if source.starts_with('@') {
+                catch_all_entries.push((source, f.destination.clone()));
             } else {
-                specific_sources.insert(f.source.clone());
-                specific_entries.push((f.source.clone(), f.destination.clone()));
+                specific_sources.insert(source.clone());
+                specific_entries.push((source, f.destination.clone()));
             }
         }
     }
@@ -699,6 +711,12 @@ pub fn generate_virtual_aliases(db: &Database) {
 
     use std::fmt::Write;
     for (source, destination) in &entries {
+        let Some(source) = sanitize_map_address(source) else {
+            continue;
+        };
+        let Some(destination) = sanitize_map_address(destination) else {
+            continue;
+        };
         let _ = writeln!(lines, "{} {}", source, destination);
     }
 
@@ -730,11 +748,16 @@ fn build_recipient_bcc_entries(forwardings: &[crate::db::Forwarding]) -> Vec<(St
     let mut bcc_map: std::collections::BTreeMap<String, Vec<String>> =
         std::collections::BTreeMap::new();
     for f in forwardings {
-        if f.active && f.keep_copy && !f.source.starts_with('@') {
-            bcc_map
-                .entry(f.source.clone())
-                .or_default()
-                .push(f.destination.clone());
+        if f.active && f.keep_copy {
+            // Use the same normalization as virtual_aliases: '*@domain' is a catch-all
+            // and must never appear in recipient_bcc as a source.
+            let source = normalize_virtual_alias_source(&f.source, f.domain_name.as_deref());
+            if !source.starts_with('@') {
+                bcc_map
+                    .entry(source)
+                    .or_default()
+                    .push(f.destination.clone());
+            }
         }
     }
     bcc_map
@@ -750,7 +773,18 @@ pub fn generate_recipient_bcc_maps(db: &Database) {
     let mut lines = generated_header();
     use std::fmt::Write;
     for (source, bcc) in &entries {
-        let _ = writeln!(lines, "{} {}", source, bcc);
+        let Some(source) = sanitize_map_address(source) else {
+            continue;
+        };
+        // The BCC value is a comma-joined list of destinations; validate each one.
+        let dests: Option<Vec<String>> = bcc
+            .split(',')
+            .map(|d| sanitize_map_address(d.trim()))
+            .collect();
+        let Some(dests) = dests else {
+            continue;
+        };
+        let _ = writeln!(lines, "{} {}", source, dests.join(", "));
     }
     match write_postfix_map("/etc/postfix/recipient_bcc", &lines) {
         Ok(_) => debug!(
@@ -775,6 +809,58 @@ fn normalize_virtual_alias_source(source: &str, domain: Option<&str>) -> String 
         }
     }
     trimmed.to_string()
+}
+
+/// Lowercase and validate a single token (username, domain or relay host) destined for
+/// a Postfix/Dovecot map file. Map files are line- and whitespace-delimited, so a value
+/// containing whitespace, control characters, '/' or '\\' would corrupt the line (or
+/// worse, inject a new one). Usernames additionally reject ':' because it is the field
+/// separator in `sasl_passwd` and the Dovecot passwd file.
+///
+/// Delivery-first: a bad value is logged and the containing entry skipped — never a
+/// panic, never a corrupted map line.
+fn sanitize_map_token(value: &str, is_username: bool) -> Option<String> {
+    let cleaned = value.trim().to_lowercase();
+    let kind = if is_username {
+        "username"
+    } else {
+        "domain/relay"
+    };
+    let invalid = cleaned.chars().any(|c| {
+        c.is_whitespace() || c.is_control() || c == '/' || c == '\\' || (is_username && c == ':')
+    });
+    if invalid {
+        error!(
+            "[config] skipping map entry: {} {:?} contains whitespace, control characters, '/' or '\\'{}",
+            kind,
+            value,
+            if is_username { " (or ':')" } else { "" }
+        );
+        None
+    } else {
+        Some(cleaned)
+    }
+}
+
+/// Lowercase and validate an email address (or '@domain' catch-all pattern) for use in a
+/// Postfix/Dovecot map. The local part is checked with username rules (no ':'), the
+/// domain part with plain domain rules. Tokens without an '@' (pure domains or relay
+/// hosts) are checked as domain values.
+fn sanitize_map_address(addr: &str) -> Option<String> {
+    let cleaned = addr.trim().to_lowercase();
+    if let Some(at) = cleaned.rfind('@') {
+        let local = &cleaned[..at];
+        let domain = &cleaned[at + 1..];
+        if !local.is_empty() && sanitize_map_token(local, true).is_none() {
+            return None;
+        }
+        if sanitize_map_token(domain, false).is_none() {
+            return None;
+        }
+        Some(cleaned)
+    } else {
+        sanitize_map_token(&cleaned, false)
+    }
 }
 
 /// Build the list of (normalized_from_address, allowed_sasl_login) pairs for sender_login_maps.
@@ -837,20 +923,17 @@ pub fn generate_sender_login_maps(db: &Database) {
     let mut lines = generated_header();
     use std::fmt::Write;
     for (sender, logins) in &map {
-        // Deduplicate logins
-        let mut unique: Vec<&String> = logins.iter().collect();
+        let Some(sender) = sanitize_map_address(sender) else {
+            continue;
+        };
+        // Deduplicate logins, skipping any that fail validation
+        let mut unique: Vec<String> = logins.iter().filter_map(|s| sanitize_map_address(s)).collect();
         unique.sort();
         unique.dedup();
-        let _ = writeln!(
-            lines,
-            "{} {}",
-            sender,
-            unique
-                .iter()
-                .map(|s| s.as_str())
-                .collect::<Vec<_>>()
-                .join(",")
-        );
+        if unique.is_empty() {
+            continue;
+        }
+        let _ = writeln!(lines, "{} {}", sender, unique.join(","));
     }
     match write_postfix_map("/etc/postfix/sender_login_maps", &lines) {
         Ok(_) => debug!(
@@ -870,10 +953,16 @@ pub fn generate_transport_maps(db: &Database) {
     let mut lines = generated_header();
     use std::fmt::Write;
     for (relay, assignment) in &assignments {
+        let Some(pattern) = sanitize_map_address(&assignment.pattern) else {
+            continue;
+        };
+        let Some(host) = sanitize_map_token(&relay.host, false) else {
+            continue;
+        };
         let _ = writeln!(
             lines,
             "{} smtp:[{}]:{}",
-            assignment.pattern, relay.host, relay.port
+            pattern, host, relay.port
         );
     }
 
@@ -894,16 +983,30 @@ pub fn generate_sasl_passwd(db: &Database) {
     info!("[config] generating {}", sasl_path);
     let assignments = db.get_active_relay_assignments_with_relay();
 
-    // Collect unique relays that have authentication configured
+    // Collect unique relays that have authentication configured. Duplicate keys are
+    // last-wins in the deterministic order the assignments come back from the DB; the
+    // earlier entry is logged so operators notice overlapping relay definitions.
     let mut relay_creds: std::collections::HashMap<String, String> =
         std::collections::HashMap::new();
     for (relay, _) in &assignments {
         if relay.auth_type != "none" {
             if let (Some(user), Some(pass)) = (&relay.username, &relay.password) {
-                let key = format!("[{}]:{}", relay.host, relay.port);
-                relay_creds
-                    .entry(key)
-                    .or_insert_with(|| format!("{}:{}", user, pass));
+                let Some(host) = sanitize_map_token(&relay.host, false) else {
+                    continue;
+                };
+                // ':' is the sasl_passwd field separator; a colon (or other forbidden
+                // character) in the username would poison the whole line.
+                let Some(user) = sanitize_map_token(user, true) else {
+                    continue;
+                };
+                let key = format!("[{}]:{}", host, relay.port);
+                let creds = format!("{}:{}", user, pass);
+                if relay_creds.insert(key.clone(), creds).is_some() {
+                    warn!(
+                        "[config] duplicate SASL credentials for {} — keeping the last entry",
+                        key
+                    );
+                }
             }
         }
     }
@@ -996,10 +1099,16 @@ pub fn generate_dovecot_passwd(db: &Database) {
             continue;
         }
         if let Some(domain) = &a.domain_name {
+            let Some(username) = sanitize_map_token(&a.username, true) else {
+                continue;
+            };
+            let Some(domain) = sanitize_map_token(domain, false) else {
+                continue;
+            };
             let _ = writeln!(
                 lines,
                 "{}@{}:{{BLF-CRYPT}}{}:::::",
-                a.username, domain, a.password_hash
+                username, domain, a.password_hash
             );
         }
     }
@@ -1807,6 +1916,41 @@ mod tests {
 
 // ── Certificate and DH parameter generation ──
 
+/// Create (or open) the private key file with 0600 permissions before openssl writes
+/// to it, so openssl's umask (often 022) can never leave the key world-readable at
+/// any point during generation.
+#[cfg(unix)]
+fn create_secure_key_file(path: &str) -> std::io::Result<()> {
+    fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .mode(0o600)
+        .open(path)
+        .map(|_| ())
+}
+
+#[cfg(not(unix))]
+fn create_secure_key_file(path: &str) -> std::io::Result<()> {
+    fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .open(path)
+        .map(|_| ())
+}
+
+/// Best-effort permission fix on the private key. Unix-only concern; on other
+/// platforms there is no mode to enforce.
+#[cfg(unix)]
+fn set_key_file_permissions(path: &str) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(path, fs::Permissions::from_mode(0o600))
+}
+
+#[cfg(not(unix))]
+fn set_key_file_permissions(_path: &str) -> std::io::Result<()> {
+    Ok(())
+}
+
 pub fn generate_tls_certificate(hostname: &str, force: bool) -> Result<(), String> {
     let cert_path = "/data/ssl/cert.pem";
     let key_path = "/data/ssl/key.pem";
@@ -1840,6 +1984,13 @@ pub fn generate_tls_certificate(hostname: &str, force: bool) -> Result<(), Strin
         return Err(format!("failed to create SSL directory: {}", e));
     }
 
+    // Pre-create the private key file with 0600 so openssl never writes it under a
+    // loose umask (e.g. 022 -> 0644, world-readable) at any point during generation.
+    if let Err(e) = create_secure_key_file(key_path) {
+        error!("[config] failed to pre-create {}: {}", key_path, e);
+        return Err(format!("failed to create private key file: {}", e));
+    }
+
     let template = match load_template("openssl.cnf.txt") {
         Ok(t) => t,
         Err(e) => {
@@ -1849,8 +2000,21 @@ pub fn generate_tls_certificate(hostname: &str, force: bool) -> Result<(), Strin
     };
 
     // Create OpenSSL config file with SAN extension
-    // Modern TLS clients require Subject Alternative Name (SAN) to be present
-    let openssl_config = template.replace("{{ hostname }}", &safe_hostname);
+    // Modern TLS clients require Subject Alternative Name (SAN) to be present.
+    // If the hostname is an IP address it must be listed as IP.1 — a DNS.1 entry
+    // that looks like an address is ignored by strict TLS clients. localhost is
+    // always included so loopback connections validate.
+    let san_entries = if let Ok(ip) = safe_hostname.parse::<std::net::IpAddr>() {
+        format!("IP.1 = {}\nIP.2 = 127.0.0.1", ip)
+    } else {
+        format!(
+            "DNS.1 = {}\nDNS.2 = localhost\nIP.1 = 127.0.0.1",
+            safe_hostname
+        )
+    };
+    let openssl_config = template
+        .replace("{{ hostname }}", &safe_hostname)
+        .replace("{{ san_entries }}", &san_entries);
 
     // Use a unique temporary file to avoid race conditions
     // Note: In Docker container context, /tmp is isolated and single-process
@@ -1862,8 +2026,11 @@ pub fn generate_tls_certificate(hostname: &str, force: bool) -> Result<(), Strin
         return Err(format!("failed to write OpenSSL config: {}", e));
     }
 
-    // Generate certificate with SAN extension
+    // Generate certificate with SAN extension. Run from /data/ssl so the key and
+    // certificate are written relative to the private directory (the pre-created
+    // 0600 key file guarantees restrictive permissions regardless of umask).
     let result = Command::new("openssl")
+        .current_dir("/data/ssl")
         .args([
             "req",
             "-new",
@@ -1876,9 +2043,9 @@ pub fn generate_tls_certificate(hostname: &str, force: bool) -> Result<(), Strin
             "-config",
             &config_path,
             "-keyout",
-            "/data/ssl/key.pem",
+            "key.pem",
             "-out",
-            "/data/ssl/cert.pem",
+            "cert.pem",
         ])
         .output();
 
@@ -1890,17 +2057,14 @@ pub fn generate_tls_certificate(hostname: &str, force: bool) -> Result<(), Strin
         );
     }
 
+    // Ensure the private key is 0600 no matter how openssl exited — it may have
+    // created the key file just before failing.
+    if let Err(e) = set_key_file_permissions(key_path) {
+        warn!("[config] failed to set key.pem permissions: {}", e);
+    }
+
     match result {
         Ok(output) if output.status.success() => {
-            // Set secure permissions on the private key
-            match Command::new("chmod")
-                .args(["600", "/data/ssl/key.pem"])
-                .output()
-            {
-                Ok(o) if o.status.success() => debug!("[config] set key.pem permissions to 600"),
-                Ok(o) => warn!("[config] chmod 600 key.pem exited with status {}", o.status),
-                Err(e) => warn!("[config] failed to set key.pem permissions: {}", e),
-            }
             info!("[config] TLS certificate with SAN generated successfully");
             Ok(())
         }

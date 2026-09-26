@@ -86,12 +86,22 @@ services:
     environment:
       NGINX_HOST: ${HOSTNAME:-mail.example.com}
       NGINX_ENVSUBST_FILTER: ^NGINX_HOST$
+      # The image's /docker-entrypoint.sh only runs the /docker-entrypoint.d/*
+      # scripts (which is what performs envsubst) when its first argument is
+      # "nginx" — it tests `[ "$1" = "nginx" ]`. Because `command:` below
+      # overrides CMD with the reload-poller shell, the entrypoint skips that
+      # block entirely, so the stock /etc/nginx/nginx.conf is loaded with an
+      # empty conf.d/default.conf: no server blocks, no listeners, and every
+      # connection on 80/443 is reset. The poller therefore runs envsubst
+      # explicitly. Output goes to conf.d/, which the stock nginx.conf includes.
+      NGINX_ENVSUBST_OUTPUT_DIR: /etc/nginx/conf.d
     # Polls for the certbot reload trigger on the shared maildata volume and
     # reloads nginx in place when present (no Docker socket, no restart).
     command: >
-      /bin/sh -c 'while :; do [ -f /data/ssl-reload-requested ] && nginx -s reload && rm -f /data/ssl-reload-requested; sleep 60; done & exec nginx -g "daemon off;"'
+      /bin/sh -c '/docker-entrypoint.d/20-envsubst-on-templates.sh;
+      while :; do [ -f /data/ssl-reload-requested ] && nginx -s reload && rm -f /data/ssl-reload-requested; sleep 60; done & exec nginx -g "daemon off;"'
     volumes:
-      - ./nginx/nginx.conf.template:/etc/nginx/templates/nginx.conf.template:ro
+      - ./nginx/nginx.conf.template:/etc/nginx/templates/app.conf.template:ro
       - ./nginx/proxy_params.conf:/etc/nginx/proxy_params.conf:ro
       # Neutralize the stock image's default.conf so it cannot shadow the ACME
       # port-80 listener (see the default_server directive in nginx.conf.template).
